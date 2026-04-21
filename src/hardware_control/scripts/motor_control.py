@@ -9,10 +9,10 @@ from rcl_interfaces.msg import SetParametersResult
 # from hardware_control.mks import MKS
 import numpy as np
 import can
+from can.bus import BusState
 import time
 import os
 import json
-from can.bus import BusState
 
 class MKS():
     def __init__(self):
@@ -107,12 +107,13 @@ class MotorControl(Node):
         self.acc = self.get_parameter('acc').get_parameter_value().integer_value
         self.add_on_set_parameters_callback(self.param_callback)
 
-        self.canID = [0x01, 0x02, 0x04, 0x05, 0x06]
+        self.canID = (0x01, 0x02, 0x04, 0x05, 0x06)
         self.gear_ratio = np.array([13.5, 150, 48, 67.82, 67.82, 150])
         self.mks = MKS()
         
         self.storage_file = os.path.join(os.path.expanduser('~'), 'canbus_ws', 'joint_positions.json')
-        self.joint_position = self.load_joint_positions()
+        self.joint_position_offset = self.load_joint_positions()
+        self.joint_position = np.copy(self.joint_position_offset)
 
         self.create_subscription(JointState, 'joint_cmd', self.joint_state_callback, 10)
         self.feedback_publisher = self.create_publisher(JointState, 'joint_states', 10)
@@ -150,29 +151,29 @@ class MotorControl(Node):
             self.get_logger().error(f"Failed to save joint positions: {e}")
 
     def publish_feedback(self):
-        motor_position = np.zeros(6)
-        joint_speed = np.zeros(6)
+        motor_rev = np.zeros(6)
         motor_speed = np.zeros(5)
 
         for i, id in enumerate(self.canID):
             carry, encoder = self.mks.read_position(id) or (0.0, 0.0)
-            motor_position[i] = carry + encoder / 16383
+            motor_rev[i] = carry + encoder / 16383
             motor_speed[i] = self.mks.read_speed(id) or 0.0
 
-        self.joint_position[0] += motor_position[0] / self.gear_ratio[0]
-        self.joint_position[1] += motor_position[1] / self.gear_ratio[1]
-        self.joint_position[3] += motor_position[2] / self.gear_ratio[2]
-        self.joint_position[4] += 0.5 * (motor_position[3] + motor_position[4]) / self.gear_ratio[3]
-        self.joint_position[5] += 0.5 * (motor_position[3] - motor_position[4]) / self.gear_ratio[4]
-        self.joint_position = self.joint_position * (2 * np.pi)                   # convert rev to rad
+        self.joint_position[0] = self.joint_position_offset[0] + (motor_rev[0] / self.gear_ratio[0]) 
+        self.joint_position[1] = self.joint_position_offset[1] + (motor_rev[1] / self.gear_ratio[1]) 
+        self.joint_position[3] = self.joint_position_offset[3] + (motor_rev[2] / self.gear_ratio[2]) 
+        self.joint_position[4] = self.joint_position_offset[4] + (0.5 * (motor_rev[3] + motor_rev[4]) / self.gear_ratio[3])
+        self.joint_position[5] = self.joint_position_offset[5] + (0.5 * (motor_rev[3] - motor_rev[4]) / self.gear_ratio[4])
+        self.joint_positiom *= 2 * np.pi                                          # convert from rev to rad
         self.joint_position = (self.joint_position + np.pi) % (2 * np.pi) - np.pi # normalize to [-pi, pi]
 
+        joint_speed = np.zeros(6)
         joint_speed[0] = motor_speed[0] / self.gear_ratio[0]
         joint_speed[1] = motor_speed[1] / self.gear_ratio[1]
         joint_speed[2] = motor_speed[2] / self.gear_ratio[2]
         joint_speed[4] = 0.5 * (motor_speed[3] + motor_speed[4]) / self.gear_ratio[3]   
         joint_speed[5] = 0.5 * (motor_speed[3] - motor_speed[4]) / self.gear_ratio[4]
-        joint_speed = joint_speed / (60 / (2 * np.pi))                  # convert from rpm to rad/s
+        joint_speed /= 30 /np.pi              # convert from rpm to rad/s
 
         msg = JointState()
         msg.position = self.joint_position.tolist()
@@ -201,6 +202,7 @@ class MotorControl(Node):
         for id in self.canID:
             self.mks.reset_motor(id)
         self.joint_position = np.zeros(6)
+        self.joint_position_offset = np.zeros(6)
         self.save_joint_positions()
         return response
 

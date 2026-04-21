@@ -38,3 +38,6 @@ sudo apt install python3-serial
 sudo apt install python3-yaml
 sudo apt install python3-pynput
 ```
+```bash
+ls /dev/serial/by-id/
+```
