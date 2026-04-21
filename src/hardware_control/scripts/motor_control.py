@@ -10,6 +10,8 @@ from rcl_interfaces.msg import SetParametersResult
 import numpy as np
 import can
 import time
+import os
+import json
 from can.bus import BusState
 
 class MKS():
@@ -108,12 +110,16 @@ class MotorControl(Node):
         self.canID = [0x01, 0x02, 0x04, 0x05, 0x06]
         self.gear_ratio = np.array([13.5, 150, 48, 67.82, 67.82, 150])
         self.mks = MKS()
+        
+        self.storage_file = os.path.join(os.path.expanduser('~'), 'canbus_ws', 'joint_positions.json')
+        self.joint_position = self.load_joint_positions()
 
         self.create_subscription(JointState, 'joint_cmd', self.joint_state_callback, 10)
         self.feedback_publisher = self.create_publisher(JointState, 'joint_states', 10)
         self.create_timer(1.0/freq, self.publish_feedback)
         self.create_service(Trigger, 'stop', self.stop_callback)
         self.create_service(Trigger, 'reset', self.reset_callback)
+        self.create_service(Trigger, 'set_home', self.set_home_callback)
 
         self.get_logger().info("Motor Control Node: RUNNING...")
 
@@ -124,24 +130,42 @@ class MotorControl(Node):
                 self.get_logger().info(f"acc set {self.acc}")
         return SetParametersResult(successful=True)
 
+    def load_joint_positions(self):
+        if os.path.exists(self.storage_file):
+            try:
+                with open(self.storage_file, 'r') as f:
+                    data = json.load(f)
+                    self.get_logger().info("Loaded joint positions from storage.")
+                    return np.array(data)
+            except Exception as e:
+                self.get_logger().error(f"Failed to load joint positions: {e}")
+        return np.zeros(6)
+
+    def save_joint_positions(self):
+        try:
+            with open(self.storage_file, 'w') as f:
+                json.dump(self.joint_position.tolist(), f)
+                self.get_logger().info("Saved joint positions to storage.")
+        except Exception as e:
+            self.get_logger().error(f"Failed to save joint positions: {e}")
+
     def publish_feedback(self):
-        joint_position = np.zeros(6)
-        motor_position = np.zeros(np.size(joint_position))
-        joint_speed = np.zeros(np.size(joint_position))
-        motor_speed = np.zeros(np.size(joint_position))
+        motor_position = np.zeros(6)
+        joint_speed = np.zeros(6)
+        motor_speed = np.zeros(5)
 
         for i, id in enumerate(self.canID):
             carry, encoder = self.mks.read_position(id) or (0.0, 0.0)
             motor_position[i] = carry + encoder / 16383
             motor_speed[i] = self.mks.read_speed(id) or 0.0
 
-        joint_position[0] = motor_position[0] / self.gear_ratio[0]
-        joint_position[1] = motor_position[1] / self.gear_ratio[1]
-        joint_position[3] = motor_position[2] / self.gear_ratio[2]
-        joint_position[4] = 0.5 * (motor_position[3] + motor_position[4]) / self.gear_ratio[3]
-        joint_position[5] = 0.5 * (motor_position[3] - motor_position[4]) / self.gear_ratio[4]
-        joint_position = joint_position * (2 * np.pi)                   # convert rev to rad
-        joint_position = (joint_position + np.pi) % (2 * np.pi) - np.pi # normalize to [-pi, pi]
+        self.joint_position[0] += motor_position[0] / self.gear_ratio[0]
+        self.joint_position[1] += motor_position[1] / self.gear_ratio[1]
+        self.joint_position[3] += motor_position[2] / self.gear_ratio[2]
+        self.joint_position[4] += 0.5 * (motor_position[3] + motor_position[4]) / self.gear_ratio[3]
+        self.joint_position[5] += 0.5 * (motor_position[3] - motor_position[4]) / self.gear_ratio[4]
+        self.joint_position = self.joint_position * (2 * np.pi)                   # convert rev to rad
+        self.joint_position = (self.joint_position + np.pi) % (2 * np.pi) - np.pi # normalize to [-pi, pi]
 
         joint_speed[0] = motor_speed[0] / self.gear_ratio[0]
         joint_speed[1] = motor_speed[1] / self.gear_ratio[1]
@@ -151,10 +175,10 @@ class MotorControl(Node):
         joint_speed = joint_speed / (60 / (2 * np.pi))                  # convert from rpm to rad/s
 
         msg = JointState()
-        msg.position = joint_position.tolist()
+        msg.position = self.joint_position.tolist()
         msg.velocity = joint_speed.tolist()
         self.feedback_publisher.publish(msg)
-        # self.get_logger().info(f"{joint_position[0]:.2f} | {joint_speed[0]:.2f}")
+        # self.get_logger().info(f"{self.joint_position[0]:.2f} | {joint_speed[0]:.2f}")
 
     def stop_callback(self, request, response):
         response.success = True
@@ -164,10 +188,20 @@ class MotorControl(Node):
         return response
 
     def reset_callback(self, request, response):
+        self.save_joint_positions()
         response.success = True
         response.message = "Motors reset"
         for id in self.canID:
             self.mks.reset_motor(id)
+        return response
+    
+    def set_home_callback(self, request, response):
+        response.success = True
+        response.message = "Home position set"
+        for id in self.canID:
+            self.mks.reset_motor(id)
+        self.joint_position = np.zeros(6)
+        self.save_joint_positions()
         return response
 
     def joint_state_callback(self, msg: JointState):
@@ -192,6 +226,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        node.save_joint_positions()
         node.destroy_node()
         rclpy.shutdown()
 
