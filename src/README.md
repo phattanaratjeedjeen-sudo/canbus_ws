@@ -2,11 +2,11 @@
 
 
 ## Table of Contents
-- [Install CAN Lib](#install-can-lib)
+<!-- - [Install CAN Lib](#install-can-lib)
 - [Network Interfaces Setup](#network-interfaces-setup)
-- []
+- [] -->
 
-## Install CAN Lib
+<!-- ## Install CAN Lib
 ```bash
 cd ~/canbus_ws
 
@@ -30,9 +30,11 @@ sudo ip link set up can0
 sudo modprobe vcan
 sudo ip link add dev vcan0 type vcan
 sudo ip link set up vcan0
-```
+``` -->
 
+```bash
 sudo apt install python3-can
 sudo apt install python3-serial
 sudo apt install python3-yaml
 sudo apt install python3-pynput
+```
