@@ -16,10 +16,6 @@ import json
 
 class MKS():
     def __init__(self):
-        self.dir = {
-            -1: 0x80, # CW
-             1: 0x00  # CCW
-        }
         try:
             self.bus = can.interface.Bus(
                 interface='slcan', 
@@ -36,12 +32,18 @@ class MKS():
             print(f"Failed to connect to CAN bus: {e}")
 
     def send_speed(self, canID, speed, acc):
+        if speed < 0:
+            dir = 0x80 # CW
+        else:
+            dir = 0x00 # CCW
+        speed = abs(speed)
         byte1 = 0xF6
-        speed_high = (abs(speed) >> 8) & 0x0F
-        byte2 = self.dir.get(np.sign(speed), 0x00) | speed_high
-        byte3 = abs(speed) & 0xFF
+        speed_high = (speed >> 8) & 0x0F
+        byte2 = dir | speed_high
+        byte3 = speed & 0xFF
         byte4 = max(0, min(acc, 255))  
-        self.send_command(canID, [byte1, byte2, byte3, byte4])
+        data = [canID, byte1, byte2, byte3, byte4]
+        self.send_command(canID, data[1:])
 
     def read_speed(self, canID):
         byte1 = 0x32
@@ -69,9 +71,6 @@ class MKS():
                 encoder = int.from_bytes(msg.data[5:7], byteorder='big', signed=False)
                 return carry, encoder
         return None
-    
-    def read_abs_position(self, canID):
-        pass
 
     def stop_motor(self, canID):
         byte1 = 0xF7
@@ -258,8 +257,8 @@ class MotorControl(Node):
         motor_speed[0] = msg.velocity[0] * self.gear_ratio[0]                           # j1
         motor_speed[1] = msg.velocity[1] * self.gear_ratio[1]                           # j2
         motor_speed[2] = msg.velocity[3] * self.gear_ratio[3]                           # j4
-        motor_speed[3] = 0.5 * (msg.velocity[4] + msg.velocity[5]) * self.gear_ratio[4] # j5
-        motor_speed[4] = 0.5 * (msg.velocity[4] - msg.velocity[5]) * self.gear_ratio[5] # j6
+        motor_speed[3] = msg.velocity[4] * self.gear_ratio[4] # j5
+        motor_speed[4] = msg.velocity[5] * self.gear_ratio[5] # j6
 
         for i, id in enumerate(self.canID):
             speed = int(motor_speed[i] * 60 / (2 * np.pi))                              # convert to rpm

@@ -1,43 +1,45 @@
 # MKS Stepper Motor Driver with CAN
 
-
 ## Table of Contents
-<!-- - [Install CAN Lib](#install-can-lib)
-- [Network Interfaces Setup](#network-interfaces-setup)
-- [] -->
+- [Install Python Library](#install-python-library)
+- [Use This Package](#use-this-package)
+- [Rus Ros2 Node](#run-ros2-node)
 
-<!-- ## Install CAN Lib
-```bash
-cd ~/canbus_ws
-
-# create python env
-python3 -m venv .venv
-source .venv/bin/activate
-
-# install lib
-pip install python-can
-```
-
-
-## Network Interfaces Setup
-**Pyhsical CAN Hardware**
-```bash
-sudo ip link set can0 type can bitrate 500000
-sudo ip link set up can0
-```
-**Virtual CAN**
-```bash
-sudo modprobe vcan
-sudo ip link add dev vcan0 type vcan
-sudo ip link set up vcan0
-``` -->
-
+## Install Python Library
 ```bash
 sudo apt install python3-can
 sudo apt install python3-serial
 sudo apt install python3-yaml
 sudo apt install python3-pynput
 ```
-```bash
-ls /dev/serial/by-id/
-```
+
+## Use This Package
+1. Clone repo
+    ```bash
+    cd ~
+    git clone https://github.com/phattanaratjeedjeen-sudo/canbus_ws.git
+    ```
+
+2. Build package
+    ```bash
+    cd canbus-ws
+    colcon build && source install/setup.bash
+    ```
+
+3. Setup environment
+    ```bash
+    echo "source ~/canbus_ws/install/setup.bash" --> ~/.bashrc
+    source ~/.bashrc
+    ```
+
+## Run ros2 node 
+1. Run teleop node
+    ```bash
+    ros2 run hardware_control teleop_jog.py 
+    ```
+
+2. Run motor control node
+    ```bash
+    # On new terminal
+    ros2 run hardware_control motor_control.py
+    ```

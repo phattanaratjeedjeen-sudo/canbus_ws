@@ -34,7 +34,8 @@ class TeleopJog(Node):
             keyboard.Key.down: self.decrease_speed,
             keyboard.Key.enter: self.call_stop_service,
             keyboard.Key.esc: self.call_reset_service,
-            keyboard.Key.alt: self.call_set_home_service
+            keyboard.Key.alt: self.call_set_home_service,
+            keyboard.Key.shift: self.call_go_home_service
         }
 
         self.msg = JointState()
@@ -50,6 +51,7 @@ class TeleopJog(Node):
         self.stop_client = self.create_client(Trigger, 'stop')
         self.reset_client = self.create_client(Trigger, 'reset')
         self.set_home_client = self.create_client(Trigger, 'set_home')
+        self.go_home_client = self.create_client(Trigger, 'go_home')
         self.create_timer(0.1, self.timer_callback)
 
     def increase_speed(self):
@@ -70,6 +72,7 @@ class TeleopJog(Node):
             "Press [Enter]: Call /stop service to stop all motors\n"
             "Press [ESC]: Call /reset service to reset all motors\n"
             "Press [Alt]: Call /set_home service to set home position\n"
+            "Press [Shift]: Call /go_home service to go to home position\n"
             "-------------------------------"
         )
 
@@ -80,20 +83,9 @@ class TeleopJog(Node):
                 if char in self.positive_keys or char in self.negative_keys:
                     self.active_keys.add(char)
 
-            if key == keyboard.Key.up:
-                self.current_velocity += self.step
-                self.get_logger().info(f"Speed: {self.current_velocity:.2f}")
-            elif key == keyboard.Key.down:
-                self.current_velocity -= self.step
-                self.current_velocity = max(0.0, self.current_velocity)
-                self.get_logger().info(f"Speed: {self.current_velocity:.2f}")
-            elif key == keyboard.Key.enter:
-                self.call_stop_service()
-            elif key == keyboard.Key.esc:
-                self.call_reset_service()
-            elif key == keyboard.Key.alt:
-                self.call_set_home_service()
-
+            if key in self.options_keys:
+                self.options_keys[key]()
+            
         except Exception as e:
             pass
 
@@ -170,6 +162,23 @@ class TeleopJog(Node):
         try:
             response = future.result()
             self.get_logger().info(f"Set Home response: {response.message}")
+        except Exception as e:
+            self.get_logger().error(f"Service call failed {e}")
+
+    def call_go_home_service(self):
+        if not self.go_home_client.wait_for_service(timeout_sec=0.5):
+            self.get_logger().error('/go_home service not available')
+            return
+        
+        self.get_logger().warn('Shift pressed: Go to home position...')
+        req = Trigger.Request()
+        future = self.go_home_client.call_async(req)
+        future.add_done_callback(self.go_home_service_callback)
+
+    def go_home_service_callback(self, future):
+        try:
+            response = future.result()
+            self.get_logger().info(f"Go Home response: {response.message}")
         except Exception as e:
             self.get_logger().error(f"Service call failed {e}")
 
