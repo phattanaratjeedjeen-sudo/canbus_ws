@@ -16,7 +16,9 @@ try:
 except can.CanError as e:
     print(f"Failed to connect to CAN bus: {e}")
 
-
+def calibrate(canID):
+    code = 0x40
+    send_command(canID, [code])
 
 def read_abspose(canID):
     code = 0x31
@@ -31,15 +33,6 @@ def read_abspose(canID):
              pos = int.from_bytes(pos_data, byteorder='big', signed=True)
              return pos
     return None
-
-def go2pos(canID, target_pos, speed, acc):
-    code = 0xF5
-    speed_h = abs(speed) >> 8 & 0x0F
-    speed_l = abs(speed) & 0xFF
-    target_b5 = target_pos >> 16 & 0xFF
-    target_b6 = target_pos >> 8 & 0xFF
-    target_b7 = target_pos & 0xFF
-    send_command(canID, [code, speed_h, speed_l, max(0,min(acc,255)) & 0xFF, target_b5, target_b6, target_b7])
 
 def send_command(canID, data):
     crc = (canID + sum(data)) & 0xFF
@@ -56,12 +49,12 @@ def send_command(canID, data):
     except can.CanError as e:
         print(f"Communication Error: {e}")
 
+# calibrate(0x06)
 
-read_abspose(0x01)
 while True:
-    go2pos(canID=0x01, target_pos=10000, speed=30, acc=5)
+    # go2pos(canID=0x02, target_pos=0, speed=100, acc=5)
     time.sleep(1.0)
-    pos = read_abspose(0x01)
+    pos = read_abspose(0x02)
     if pos is not None:
         print(f"Current Position: {pos}")
 

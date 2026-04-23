@@ -6,121 +6,11 @@ from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
 from rclpy.parameter import Parameter, ParameterType
 from rcl_interfaces.msg import SetParametersResult
-# from hardware_control.mks import MKS
+from hardware_control.mks import MKS
 import numpy as np
-import can
-from can.bus import BusState
 import time
 import os
 import json
-
-class MKS():
-    def __init__(self):
-        self.dir = {
-            -1: 0x80, # CW
-             1: 0x00  # CCW
-        }
-        try:
-            self.bus = can.interface.Bus(
-                interface='slcan', 
-                channel='/dev/serial/by-id/usb-Openlight_Labs_CANable2_b158aa7_github.com_normaldotcom_canable2.git_209C36A83945-if00', 
-                bitrate=500000)
-            
-            try:
-                self.bus.state = BusState.PASSIVE
-            except NotImplementedError:
-                pass
-            
-            print("Connected to CAN bus via Openlight CANable2")
-        except can.CanError as e:
-            print(f"Failed to connect to CAN bus: {e}")
-
-    def send_speed(self, canID, speed, acc):
-        byte1 = 0xF6
-        speed_high = (abs(speed) >> 8) & 0x0F
-        byte2 = self.dir.get(np.sign(speed), 0x00) | speed_high
-        byte3 = abs(speed) & 0xFF
-        byte4 = max(0, min(acc, 255))  
-        self.send_command(canID, [byte1, byte2, byte3, byte4])
-
-    def read_speed(self, canID):
-        byte1 = 0x32
-        self.send_command(canID, [byte1])
-
-        timeout = 0.005
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            msg = self.bus.recv(0.001)
-            if msg is not None and msg.arbitration_id == canID and msg.data[0] == byte1:
-                rmp = int.from_bytes(msg.data[1:3], byteorder='big', signed=True)
-                return rmp
-        return None
-
-    def read_position(self, canID):
-        byte1 = 0x30
-        self.send_command(canID,[byte1])
-        
-        timeout = 0.005
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            msg = self.bus.recv(0.001)
-            if msg is not None and msg.arbitration_id == canID and msg.data[0] == byte1:
-                carry = int.from_bytes(msg.data[1:5], byteorder='big', signed=True)
-                encoder = int.from_bytes(msg.data[5:7], byteorder='big', signed=False)
-                return carry, encoder
-        return None
-    
-    def read_abs_position(self, canID):
-        pass
-
-    def stop_motor(self, canID):
-        byte1 = 0xF7
-        self.send_command(canID, [byte1])
-
-    def reset_motor(self, canID):
-        byte1 = 0x41   
-        self.send_command(canID, [byte1])
-
-    def go_home(self, canID, homeDir):
-        self.set_go_home_properties(canID, homeDir)
-        byte1 = 0x91
-        byte2 = 0x01
-        self.send_command(canID, [byte1, byte2])
-
-    def set_home_position(self, canID):
-        byte1 = 0x92
-        self.send_command(canID, [byte1])
-        time.sleep(0.1)
-    
-    def set_go_home_properties(self, canID, homeDir):
-        if homeDir == "cw":
-            byte3 = 0x00
-        else:
-            byte3 = 0x01
-        byte1 = 0x90 # code
-        byte2 = 0x00 # homeTrig
-        byte4 = 0x00 # homeSpeed
-        byte5 = 0x64 # homeSpeed
-        byte6 = 0x00 # Endlimit
-        byte7 = 0x02 # hm_mode
-        self.send_command(canID, [byte1, byte2, byte3, byte4, byte5, byte6, byte7])
-        time.sleep(0.1)
-
-    def send_command(self,canID, data):
-        crc = (canID + sum(data)) & 0xFF
-        full_data = data + [crc]
-
-        msg = can.Message(
-            arbitration_id=canID,
-            data=full_data,
-            is_extended_id=False
-        )
-        try:
-            self.bus.send(msg)
-        except can.CanError as e:
-            print(f"Communication Error: {e}")
-
-    
 
 
 class MotorControl(Node):
@@ -210,7 +100,6 @@ class MotorControl(Node):
         msg.position = self.joint_position.tolist()
         msg.velocity = joint_speed.tolist()
         self.feedback_publisher.publish(msg)
-        self.get_logger().info(f"{self.joint_position[0]:.2f} | {joint_speed[0]:.2f}")
 
     def stop_callback(self, request, response):
         response.success = True
@@ -241,22 +130,15 @@ class MotorControl(Node):
     def go_home_callback(self, request, response):
         response.success = True
         response.message = "Going to home position"
-        
-        if self.joint_position[0] < 0:
-            homeDir = "cw"
-        else:            
-            homeDir = "ccw"
-
-        self.mks.go_home(self.canID[0], homeDir)
-
-        # for id in self.canID:
-        #      self.mks.go_home(id, homeDir)
+        target_pos = -self.joint_position[[0,1,3,4,5]] * self.gear_ratio[0:5] * 16383 / (2 * np.pi)
+        for i, id in enumerate(self.canID):
+            self.mks.go2pos(canID=id, target_pos=int(target_pos[i]), speed=100, acc=self.acc)
         return response
 
     def joint_state_callback(self, msg: JointState):
         motor_speed = np.zeros(5)
         motor_speed[0] = msg.velocity[0] * self.gear_ratio[0]                           # j1
-        motor_speed[1] = msg.velocity[1] * self.gear_ratio[1]                           # j2
+        motor_speed[1] = -msg.velocity[1] * self.gear_ratio[1]                          # j2
         motor_speed[2] = msg.velocity[3] * self.gear_ratio[3]                           # j4
         motor_speed[3] = 0.5 * (msg.velocity[4] + msg.velocity[5]) * self.gear_ratio[4] # j5
         motor_speed[4] = 0.5 * (msg.velocity[4] - msg.velocity[5]) * self.gear_ratio[5] # j6

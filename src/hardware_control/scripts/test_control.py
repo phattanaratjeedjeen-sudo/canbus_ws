@@ -241,12 +241,12 @@ class MotorControl(Node):
         response.success = True
         response.message = "Going to home position"
         
-        if self.joint_position[0] < 0:
-            homeDir = "cw"
-        else:            
-            homeDir = "ccw"
+        # if self.joint_position[0] < 0:
+        #     homeDir = "cw"
+        # else:            
+        #     homeDir = "ccw"
 
-        self.mks.go_home(self.canID[0], homeDir)
+        # self.mks.go_home(self.canID[0], homeDir)
 
         # for id in self.canID:
         #      self.mks.go_home(id, homeDir)

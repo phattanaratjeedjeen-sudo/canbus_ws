@@ -12,7 +12,7 @@ try:
 except NotImplementedError:
     pass
 
-canID = 0x01
+canID = 0x05
 data = [0x31]
 
 def send_command(canID, data):
@@ -31,7 +31,6 @@ def send_command(canID, data):
         print(f"Communication Error: {e}")
 
 
-
 while True:
     send_command(canID, data)
     time.sleep(1.0)
@@ -41,5 +40,4 @@ while True:
         pos = int.from_bytes(pos_data, byteorder='big', signed=True)
 
         print(f"encoder: {pos}")
-        
 
