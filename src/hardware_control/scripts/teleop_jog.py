@@ -71,8 +71,8 @@ class TeleopJog(Node):
             "Arrows Up/Down: Change Global Speed \n"
             "Press [Enter]: Call /stop service to stop all motors\n"
             "Press [ESC]: Call /reset service to reset all motors\n"
-            "Press [Alt]: Call /set_home service to set home position\n"
             "Press [Shift]: Call /go_home service to go to home position\n"
+            "Press [Alt]: Call /set_home service to set current position as home\n"
             "-------------------------------"
         )
 

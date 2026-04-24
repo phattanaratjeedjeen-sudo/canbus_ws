@@ -29,16 +29,19 @@ class MotorControl(Node):
             self.mks.reset_motor(id)
             time.sleep(0.1)
         
-        self.storage_file = os.path.join(os.path.expanduser('~'), 'canbus_ws', 'joint_positions.json')
+        self.joint_memory = os.path.join(os.path.expanduser('~'), 'canbus_ws', 'joint_positions.json')
         self.joint_position_offset = self.load_joint_positions()
         self.joint_position = np.copy(self.joint_position_offset)
+        self.home_position = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        self.upper_limit = np.array([np.deg2rad(130), np.deg2rad(100), np.deg2rad(100), 0.0, 0.0, 0.0])
+        self.lower_limit = np.array([-np.deg2rad(130), np.deg2rad(-60), np.deg2rad(-100), 0.0, 0.0, 0.0])
 
         self.create_subscription(JointState, 'joint_cmd', self.joint_state_callback, 10)
         self.feedback_publisher = self.create_publisher(JointState, 'joint_states', 10)
         self.create_timer(1.0/freq, self.publish_feedback)
         self.create_service(Trigger, 'stop', self.stop_callback)
         self.create_service(Trigger, 'reset', self.reset_callback)
-        self.create_service(Trigger, 'set_home', self.set_home_callback)
+        # self.create_service(Trigger, 'set_home' ,self.set_home_callback)
         self.create_service(Trigger, 'go_home', self.go_home_callback)
 
         self.get_logger().info("Motor Control Node: RUNNING...")
@@ -51,9 +54,9 @@ class MotorControl(Node):
         return SetParametersResult(successful=True)
 
     def load_joint_positions(self):
-        if os.path.exists(self.storage_file):
+        if os.path.exists(self.joint_memory):
             try:
-                with open(self.storage_file, 'r') as f:
+                with open(self.joint_memory, 'r') as f:
                     data = json.load(f)
                     self.get_logger().info("Loaded joint positions from storage.")
                     return np.array(data)
@@ -63,7 +66,7 @@ class MotorControl(Node):
 
     def save_joint_positions(self):
         try:
-            with open(self.storage_file, 'w') as f:
+            with open(self.joint_memory, 'w') as f:
                 json.dump(self.joint_position.tolist(), f)
                 self.get_logger().info("Saved joint positions to storage.")
         except Exception as e:
@@ -71,22 +74,21 @@ class MotorControl(Node):
 
     def publish_feedback(self):
         motor_rev = np.zeros(6)
-        motor_speed = np.zeros(5)
+        motor_speed = np.zeros(6)
 
         for i, id in enumerate(self.canID):
-            carry, encoder = self.mks.read_position(id) or (0.0, 0.0)
-            motor_rev[i] = carry + encoder / 16383
+            encoder = self.mks.read_abs_position(id) or 0.0
+            motor_rev[i] = encoder / 16383
             motor_speed[i] = self.mks.read_speed(id) or 0.0
 
         joint_delta = np.zeros(6)
         joint_delta[0] = motor_rev[0] / self.gear_ratio[0] 
-        joint_delta[1] = motor_rev[1] / self.gear_ratio[1] 
+        joint_delta[1] = -motor_rev[1] / self.gear_ratio[1] 
         joint_delta[3] = motor_rev[2] / self.gear_ratio[2] 
         joint_delta[4] = 0.5 * (motor_rev[3] + motor_rev[4]) / self.gear_ratio[3]
         joint_delta[5] = 0.5 * (motor_rev[3] - motor_rev[4]) / self.gear_ratio[4]
         joint_delta_rad = joint_delta * 2 * np.pi
         self.joint_position = self.joint_position_offset + joint_delta_rad
-        self.joint_position = (self.joint_position + np.pi) % (2 * np.pi) - np.pi # normalize to [-pi, pi]
 
         joint_speed = np.zeros(6)
         joint_speed[0] = motor_speed[0] / self.gear_ratio[0]
@@ -110,31 +112,41 @@ class MotorControl(Node):
 
     def reset_callback(self, request, response):
         self.save_joint_positions()
+        self.joint_position = self.load_joint_positions()
+        self.joint_position_offset = np.copy(self.joint_position)
         response.success = True
         response.message = "Motors reset"
         for id in self.canID:
             self.mks.reset_motor(id)
         return response
     
-    def set_home_callback(self, request, response):
-        response.success = True
-        response.message = "Home position set"
-        for id in self.canID:
-            self.mks.set_home_position(id)
-            self.mks.reset_motor(id)
-        self.joint_position = np.zeros(6)
-        self.joint_position_offset = np.zeros(6)
-        self.save_joint_positions()
-        return response
+    # def set_home_callback(self, request, response):
+    #     self.save_joint_positions()
+    #     response.success = True
+    #     response.message = "Home position set"
+    #     return response
     
     def go_home_callback(self, request, response):
         response.success = True
         response.message = "Going to home position"
-        target_pos = -self.joint_position[[0,1,3,4,5]] * self.gear_ratio[0:5] * 16383 / (2 * np.pi)
-        for i, id in enumerate(self.canID):
-            self.mks.go2pos(canID=id, target_pos=int(target_pos[i]), speed=100, acc=self.acc)
-        return response
+        target = np.zeros(6)
+        target[0] = self.joint_position[0] * self.gear_ratio[0]     # j1
+        target[1] = -self.joint_position[1] * self.gear_ratio[1]    # j2
+        target[2] = -self.joint_position[3] * self.gear_ratio[2]    # j4
+        # target[3] = -self.joint_position[4] * self.gear_ratio[3]    # j5
+        # target[4] = -self.joint_position[5] * self.gear_ratio[4]    # j6
+        # target[5] = -self.joint_position[2] * self.gear_ratio[5]    # j3
+        target *= 16384 / (2 * np.pi)
 
+        for i, id in enumerate(self.canID):
+            self.mks.go2pos(canID=id, target_pos=int(target[i]), speed=100, acc=self.acc)
+        
+        # self.mks.go2pos(canID=0x04, target_pos=int(target[3]), speed=50, acc=self.acc)
+        # self.get_logger().info(f"{target}")
+        return response
+    
+
+    
     def joint_state_callback(self, msg: JointState):
         motor_speed = np.zeros(5)
         motor_speed[0] = msg.velocity[0] * self.gear_ratio[0]                           # j1
