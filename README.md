@@ -22,7 +22,7 @@ sudo apt install python3-pynput
 
 2. Build package
     ```bash
-    cd canbus-ws
+    cd ~/canbus-ws
     colcon build && source install/setup.bash
     ```
 
