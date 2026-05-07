@@ -87,7 +87,7 @@ class TeleopJog(Node):
                 self.options_keys[key]()
             
         except Exception as e:
-            pass
+            self.get_logger().error(f"Error in on_press: {e}")
 
     def on_release(self, key):
         if hasattr(key, 'char'):
@@ -97,22 +97,22 @@ class TeleopJog(Node):
 
     def timer_callback(self):
         new_velocities = [0.0] * self.num_joints
-        should_publish = False
+        # should_publish = False
 
         for char in self.active_keys:
             if char in self.positive_keys:
                 idx = self.positive_keys[char]
                 new_velocities[idx] += float(self.current_velocity)
-                should_publish = True
+                # should_publish = True
             elif char in self.negative_keys:
                 idx = self.negative_keys[char]
                 new_velocities[idx] -= float(self.current_velocity)
-                should_publish = True
+                # should_publish = True
 
-        if should_publish:
-            self.msg.header.stamp = self.get_clock().now().to_msg()
-            self.msg.velocity = new_velocities
-            self.joint_publisher.publish(self.msg)
+        # if should_publish:
+        self.msg.header.stamp = self.get_clock().now().to_msg()
+        self.msg.velocity = new_velocities
+        self.joint_publisher.publish(self.msg)
     
     def call_reset_service(self):
         if not self.reset_client.wait_for_service(timeout_sec=0.5):

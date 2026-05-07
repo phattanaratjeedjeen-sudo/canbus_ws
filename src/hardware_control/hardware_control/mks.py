@@ -81,7 +81,7 @@ class MKS():
         self.send_command(canID, [code])
 
     def go2pos(self, canID, target_pos, speed, acc):
-        code = 0xF4
+        code = 0xF4 # relative position control
         speedH = abs(speed) >> 8 & 0x0F
         speedL = abs(speed) & 0xFF
         target_b5 = target_pos >> 16 & 0xFF
