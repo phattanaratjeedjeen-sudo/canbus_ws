@@ -47,7 +47,7 @@ class TeleopJog(Node):
         self.listener.start()
         self.print_help()
 
-        self.joint_publisher = self.create_publisher(JointState, 'joint_cmd', 10)
+        self.joint_publisher = self.create_publisher(JointState, 'motor', 10)
         self.stop_client = self.create_client(Trigger, 'stop')
         self.reset_client = self.create_client(Trigger, 'reset')
         self.set_home_client = self.create_client(Trigger, 'set_home')

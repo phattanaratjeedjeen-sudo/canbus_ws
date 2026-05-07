@@ -34,10 +34,10 @@ class MotorControl(Node):
         self.joint_position = np.copy(self.joint_position_offset)
         self.joint_speed = np.zeros(6)
         threshold = np.deg2rad(10)
-        self.upper_limit = np.array([np.deg2rad(130), np.deg2rad(100), np.deg2rad(40), np.deg2rad(150)]) - threshold
-        self.lower_limit = np.array([-np.deg2rad(130), np.deg2rad(-60), np.deg2rad(-80), np.deg2rad(-150)]) + threshold
+        self.upper_limit = np.array([np.deg2rad(180), np.deg2rad(30), np.deg2rad(150), np.deg2rad(180)]) - threshold
+        self.lower_limit = np.array([-np.deg2rad(180), np.deg2rad(-180), np.deg2rad(-5), np.deg2rad(-180)]) + threshold
 
-        self.create_subscription(JointState, 'joint_cmd', self.joint_state_callback, 10)
+        self.create_subscription(JointState, 'motor', self.motor_callback, 10)
         self.create_subscription(JointState, 'step_joint_states', self.step_joint_state_callback, 10)
         self.feedback_publisher = self.create_publisher(JointState, 'joint_states', 10)
         self.step_cmd_publisher = self.create_publisher(JointState, 'step_joint_cmd', 10)
@@ -156,15 +156,16 @@ class MotorControl(Node):
         return response
 
     
-    def joint_state_callback(self, msg: JointState):
+    def motor_callback(self, msg: JointState):
         mask = np.array([1, -1, -1, 1, 1, 1])
         motor_speed = np.zeros(6)
-        motor_speed[0] = msg.velocity[0] * self.gear_ratio[0]                          
-        motor_speed[1] = -msg.velocity[1] * self.gear_ratio[1]                         
-        motor_speed[2] = -msg.velocity[2] * self.gear_ratio[2]                         
-        motor_speed[3] = msg.velocity[3] * self.gear_ratio[3]
-        motor_speed[4] = msg.velocity[4] * self.gear_ratio[4] + msg.velocity[5] * self.gear_ratio[5]    
-        motor_speed[5] = msg.velocity[5] * self.gear_ratio[4] - msg.velocity[4] * self.gear_ratio[5]
+        n = 0 if len(msg.velocity) == 6 else 1
+        motor_speed[0] = msg.velocity[0+n] * self.gear_ratio[0]                          
+        motor_speed[1] = -msg.velocity[1+n] * self.gear_ratio[1]                         
+        motor_speed[2] = -msg.velocity[2+n] * self.gear_ratio[2]                         
+        motor_speed[3] = msg.velocity[3+n] * self.gear_ratio[3]
+        motor_speed[4] = msg.velocity[4+n] * self.gear_ratio[4] + msg.velocity[5+n] * self.gear_ratio[5]    
+        motor_speed[5] = msg.velocity[5+n] * self.gear_ratio[4] - msg.velocity[4+n] * self.gear_ratio[5]
 
         self.publish_step_cmd(motor_speed=[motor_speed[4], motor_speed[5]])
 
