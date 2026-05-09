@@ -118,6 +118,9 @@ class MotorControl(Node):
         response.message = "Motors stopped"
         for id in self.canID:
             self.mks.stop_motor(id)
+
+        self.joint_speed = np.zeros(6+self.n)
+        self.publish_step_cmd(motor_speed=[0.0, 0.0])
         return response
 
     # def reset_callback(self, request, response):
