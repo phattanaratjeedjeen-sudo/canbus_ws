@@ -10,7 +10,7 @@ class TeleopJog(Node):
     def __init__(self):
         super().__init__('teleop_jog')
 
-        self.num_joints = 6
+        self.num_joints = 7
         self.current_velocity = 0.0
         self.active_keys = set()
         self.positive_keys = {
@@ -19,7 +19,9 @@ class TeleopJog(Node):
             '3': 2, 
             '4': 3, 
             '5': 4, 
-            '6': 5
+            '6': 5,
+            '7': 6
+
         }
         self.negative_keys = {
             'q': 0, 
@@ -27,7 +29,8 @@ class TeleopJog(Node):
             'e': 2, 
             'r': 3, 
             't': 4, 
-            'y': 5
+            'y': 5,
+            'u': 6
         }
         self.options_keys = {
             keyboard.Key.up: self.increase_speed,
@@ -66,8 +69,8 @@ class TeleopJog(Node):
     def print_help(self):
         self.get_logger().info(
             "\n--- Multi-Joint Teleop Jog ---\n"
-            "Hold Keys [1-6]: Move Joint 1-6 Forward (+vel)\n"
-            "Hold Keys [q-y]: Move Joint 1-6 Backward (-vel)\n"
+            "Hold Keys [1-7]: Move Joint 1-7 Forward (+vel)\n"
+            "Hold Keys [q-u]: Move Joint 1-7 Backward (-vel)\n"
             "Arrows Up/Down: Change Global Speed \n"
             "Press [Enter]: Call /stop service to stop all motors\n"
             "Press [ESC]: Call /reset service to reset all motors\n"

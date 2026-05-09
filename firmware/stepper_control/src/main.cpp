@@ -7,7 +7,9 @@
 #include <rclc/executor.h>
 
 #include <std_msgs/msg/int32.h>
+#include <sensor_msgs/msg/joint_state.h>
 #include <std_srvs/srv/set_bool.h>
+#include <std_srvs/srv/trigger.h>
 
 // gripper
 # define SERVO_PIN1 18
@@ -23,11 +25,18 @@ struct {
 
 
 rcl_publisher_t publisher;
-std_msgs__msg__Int32 msg;
+sensor_msgs__msg__JointState step_joint_feedback;
+
+rcl_subscription_t subscriber;
+sensor_msgs__msg__JointState step_joint_cmd;
+
 rcl_service_t service_grip;
 std_srvs__srv__SetBool_Request req_grip;
 std_srvs__srv__SetBool_Response res_grip;
 
+rcl_service_t go_home;
+std_srvs__srv__Trigger_Request req_go_home;
+std_srvs__srv__Trigger_Response res_go_home;
 
 rclc_executor_t executor;
 rclc_support_t support;
@@ -38,10 +47,16 @@ rcl_timer_t timer;
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
 
-// Error handle loop
 void error_loop() {
   while(1) {
     delay(100);
+  }
+}
+
+void step_joint_cmd_callback(const void * msgin) {
+  const sensor_msgs__msg__JointState * msg = (const sensor_msgs__msg__JointState *) msgin;
+  for (size_t i = 0; i < msg->position.size; i++) {
+    step_joint_feedback.position.data[i] = msg->position.data[i];
   }
 }
 
@@ -69,11 +84,16 @@ void grip_callback(const void * req, void * res) {
   res_in->success = true;
 }
 
+void go_home_callback(const void * req, void * res) {
+  std_srvs__srv__Trigger_Request * req_in = (std_srvs__srv__Trigger_Request *) req;
+  std_srvs__srv__Trigger_Response * res_in = (std_srvs__srv__Trigger_Response *) res;
+  res_in->success = true;
+}
+
 void timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
   RCLC_UNUSED(last_call_time);
   if (timer != NULL) {
-    RCSOFTCHECK(rcl_publish(&publisher, &msg, NULL));
-    msg.data++;
+    RCSOFTCHECK(rcl_publish(&publisher, &step_joint_feedback, NULL));
   }
 }
 
@@ -106,7 +126,7 @@ void setup() {
   RCCHECK(rclc_publisher_init_default(
     &publisher,
     &node,
-    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, JointState),
     "step_joint_feedback"));
 
   // create timer,
@@ -118,6 +138,13 @@ void setup() {
     timer_callback,
     true));
 
+  // create subscriber
+  RCCHECK(rclc_subscription_init_default(
+    &subscriber,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, JointState),
+    "step_joint_command"));
+
   // create service
   RCCHECK(rclc_service_init_default(
     &service_grip,
@@ -125,12 +152,19 @@ void setup() {
     ROSIDL_GET_SRV_TYPE_SUPPORT(std_srvs, srv, SetBool),
     "grip"));
 
+  RCCHECK(rclc_service_init_default(
+    &go_home,
+    &node,
+    ROSIDL_GET_SRV_TYPE_SUPPORT(std_srvs, srv, Trigger),
+    "go_home"));
+
   // create executor
-  RCCHECK(rclc_executor_init(&executor, &support.context, 3, &allocator));
+  RCCHECK(rclc_executor_init(&executor, &support.context, 5, &allocator));
   RCCHECK(rclc_executor_add_timer(&executor, &timer));
   RCCHECK(rclc_executor_add_service(&executor, &service_grip, &req_grip, &res_grip, grip_callback));
-  
-  msg.data = 0;
+  RCCHECK(rclc_executor_add_service(&executor, &go_home, &req_go_home, &res_go_home, go_home_callback));
+  RCCHECK(rclc_executor_add_subscription(&executor, &subscriber, &step_joint_cmd, step_joint_cmd_callback, ON_NEW_DATA));
+
 }
 
 void loop() {
