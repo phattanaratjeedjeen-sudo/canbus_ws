@@ -69,32 +69,208 @@ rcl_timer_t timer;
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
 
-void IRAM_ATTR onStepTimer1() {
-  portENTER_CRITICAL_ISR(&timerMux1);
-  // Only generate pulse if motor1 has pulse generation enabled
-  if (motor1 && motor1->getPulseGenerationEnabled()) {
-    static boolean state = 1;
-    state = !state;
-    gpio_set_level((gpio_num_t)TB6600_PUL1, state ? 1 : 0);
+void error_loop();
+void IRAM_ATTR onStepTimer1();
+void IRAM_ATTR onStepTimer2();
+void controlTask(void *pvParameters);
+void step_joint_cmd_callback(const void * msgin);
+void gripper_cmd_callback(const void * msgin);
+void timer_callback(rcl_timer_t * timer, int64_t last_call_time);
+void grip(int16_t angle1, int16_t angle2);
+
+void setup() {
+  // Create mutexes for thread-safe access
+  speedMutex = xSemaphoreCreateMutex();
+  debugDataMutex = xSemaphoreCreateMutex();
+  if (speedMutex == NULL || debugDataMutex == NULL) {
+    Serial.println("[ERROR] Failed to create mutexes.");
+    error_loop();
   }
-  portEXIT_CRITICAL_ISR(&timerMux1);
+
+  // Config Stepper & Motor Hardware
+  Wire.begin(AS5600_SDA1, AS5600_SCL1);
+  Wire.setClock(400000);
+  
+  Wire1.begin(AS5600_SDA2, AS5600_SCL2);
+  Wire1.setClock(400000);
+  esp_task_wdt_reset();
+
+  pinMode(TB6600_ENA1, OUTPUT);
+  pinMode(TB6600_DIR1, OUTPUT);
+  pinMode(TB6600_PUL1, OUTPUT);
+  digitalWrite(TB6600_ENA1, LOW); 
+  digitalWrite(TB6600_DIR1, LOW);
+
+  pinMode(TB6600_ENA2, OUTPUT);
+  pinMode(TB6600_DIR2, OUTPUT);
+  pinMode(TB6600_PUL2, OUTPUT);
+  digitalWrite(TB6600_ENA2, LOW);
+  digitalWrite(TB6600_DIR2, LOW);
+  esp_task_wdt_reset();
+
+  stepTimer1 = timerBegin(0, 80, true); 
+  timerAttachInterrupt(stepTimer1, &onStepTimer1, true);
+  timerAlarmWrite(stepTimer1, 2000, true);
+  // Don't enable yet - will be enabled when motor starts
+  // timerAlarmEnable(stepTimer1);
+
+  stepTimer2 = timerBegin(1, 80, true); 
+  timerAttachInterrupt(stepTimer2, &onStepTimer2, true);
+  timerAlarmWrite(stepTimer2, 2000, true);
+  // Don't enable yet - will be enabled when motor starts
+  // timerAlarmEnable(stepTimer2);
+  esp_task_wdt_reset();
+  
+  motor1 = new MotorController(1, Wire, TB6600_PUL1, TB6600_DIR1, stepTimer1, &timerMux1, 5.0);
+  motor2 = new MotorController( 2,  Wire1,  TB6600_PUL2, TB6600_DIR2,  stepTimer2,  &timerMux2,  5.0);
+  esp_task_wdt_reset();
+
+  xTaskCreatePinnedToCore(
+    controlTask,   // Task function.
+    "ControlTask", // String with name of task.
+    4096,          // Stack size in bytes.
+    NULL,          // Parameter passed as input of the task
+    5,             // Priority of the task (higher = more priority).
+    NULL,          // Task handle.
+    1              // Core where the task should run
+  );            
+  esp_task_wdt_reset();
+
+  // Config Servos
+  uint16_t minUs = 500; 
+  uint16_t maxUs = 2500;
+  ESP32PWM::allocateTimer(0);
+  ESP32PWM::allocateTimer(1);
+  ESP32PWM::allocateTimer(2);
+  ESP32PWM::allocateTimer(3);
+  servo1.setPeriodHertz(50);
+  servo2.setPeriodHertz(50);
+  servo1.attach(SERVO_PIN1, minUs, maxUs);
+  servo2.attach(SERVO_PIN2, minUs, maxUs);
+  esp_task_wdt_reset();
+
+  // Configure serial transport
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("[STARTUP] ESP32 Board Starting - micro-ROS initialization...");
+  set_microros_serial_transports(Serial);
+  delay(2000);
+  
+  Serial.println("[STARTUP] Initializing micro-ROS client...");
+  esp_task_wdt_reset();
+
+  allocator = rcl_get_default_allocator();
+  esp_task_wdt_reset();
+
+  // Pre-allocate buffers for subscription messages with dynamic arrays
+  step_joint_feedback.position.data = step_joint_positions;
+  step_joint_feedback.position.capacity = 2;
+  step_joint_feedback.position.size = 2;
+
+  step_joint_feedback.velocity.data = step_joint_velocities;
+  step_joint_feedback.velocity.capacity = 2;
+  step_joint_feedback.velocity.size = 2;
+  
+  step_joint_cmd.position.data = step_joint_cmd_positions;
+  step_joint_cmd.position.capacity = 2;
+  step_joint_cmd.position.size = 2;
+
+  step_joint_cmd.velocity.data = step_joint_cmd_velocities;
+  step_joint_cmd.velocity.capacity = 2;
+  step_joint_cmd.velocity.size = 2;
+
+  gripper_cmd.data.data = gripper_cmd_data;
+  gripper_cmd.data.capacity = 2;
+  gripper_cmd.data.size = 2;
+  esp_task_wdt_reset();
+
+  // create init_options
+  RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+  esp_task_wdt_reset();
+
+  // create node
+  RCCHECK(rclc_node_init_default(&node, "stepper_control", "", &support));
+  esp_task_wdt_reset();
+
+  // create publisher
+  RCCHECK(rclc_publisher_init_default(
+    &publisher,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, JointState),
+    "step_joint_feedback"));
+  esp_task_wdt_reset();
+
+  // create timer,
+  RCCHECK(rclc_timer_init_default2(
+    &timer,
+    &support,
+    RCL_MS_TO_NS(1000 / publishFreq),
+    timer_callback,
+    true));
+  esp_task_wdt_reset();
+
+  // create subscriber
+  RCCHECK(rclc_subscription_init_default(
+    &step_joint_subscriber,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, JointState),
+    "step_joint_command"));
+  esp_task_wdt_reset();
+  
+  RCCHECK(rclc_subscription_init_default(
+    &gripper_subscriber,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt16MultiArray),
+    "gripper_command"));
+  esp_task_wdt_reset();
+
+  RCCHECK(rclc_executor_init(&executor, &support.context, 3, &allocator));
+  esp_task_wdt_reset();  // Feed watchdog
+  
+  RCCHECK(rclc_executor_add_timer(&executor, &timer));
+  esp_task_wdt_reset();  // Feed watchdog
+  
+  RCCHECK(rclc_executor_add_subscription(&executor, &step_joint_subscriber, &step_joint_cmd, step_joint_cmd_callback, ON_NEW_DATA));
+  esp_task_wdt_reset();  // Feed watchdog
+  
+  RCCHECK(rclc_executor_add_subscription(&executor, &gripper_subscriber, &gripper_cmd, gripper_cmd_callback, ON_NEW_DATA));
+  esp_task_wdt_reset();  // Feed watchdog
+
+  Serial.println("[STARTUP] micro-ROS initialization complete!");
+}
+
+void loop() {
+  RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
+  vTaskDelay(pdMS_TO_TICKS(1));  // Yield to watchdog, let other tasks run
+}
+
+void IRAM_ATTR onStepTimer1() {
+  // Direct register access - avoid function calls in ISR
+  static boolean state = 1;
+  state = !state;
+  if (state) {
+    GPIO.out_w1ts = (1 << TB6600_PUL1);
+  } else {
+    GPIO.out_w1tc = (1 << TB6600_PUL1);
+  }
 }
 
 void IRAM_ATTR onStepTimer2() {
-  portENTER_CRITICAL_ISR(&timerMux2);
-  // Only generate pulse if motor2 has pulse generation enabled
-  if (motor2 && motor2->getPulseGenerationEnabled()) {
-    static boolean state = 1;
-    state = !state;
-    gpio_set_level((gpio_num_t)TB6600_PUL2, state ? 1 : 0);
+  // Direct register access - avoid function calls in ISR
+  static boolean state = 1;
+  state = !state;
+  if (state) {
+    GPIO.out_w1ts = (1 << TB6600_PUL2);
+  } else {
+    GPIO.out_w1tc = (1 << TB6600_PUL2);
   }
-  portEXIT_CRITICAL_ISR(&timerMux2);
 }
 
 void controlTask(void *pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
   const TickType_t xFrequency = pdMS_TO_TICKS(1000/controlFreq);
   float_t speed1, speed2;
+  boolean wasMoving1 = false, wasMoving2 = false;
 
   for(;;) {
     // Thread-safe read of setSpeed variables
@@ -112,6 +288,26 @@ void controlTask(void *pvParameters) {
     if (xSemaphoreTake(debugDataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
       motor1->control(speed1, &debugData1);
       motor2->control(speed2, &debugData2);
+      
+      // Enable/disable timer based on whether motor is moving
+      boolean isMoving1 = motor1->getPulseGenerationEnabled();
+      boolean isMoving2 = motor2->getPulseGenerationEnabled();
+      
+      if (isMoving1 && !wasMoving1) {
+        timerAlarmEnable(stepTimer1);
+      } else if (!isMoving1 && wasMoving1) {
+        timerAlarmDisable(stepTimer1);
+      }
+      
+      if (isMoving2 && !wasMoving2) {
+        timerAlarmEnable(stepTimer2);
+      } else if (!isMoving2 && wasMoving2) {
+        timerAlarmDisable(stepTimer2);
+      }
+      
+      wasMoving1 = isMoving1;
+      wasMoving2 = isMoving2;
+      
       xSemaphoreGive(debugDataMutex);
     }
     
@@ -177,156 +373,4 @@ void timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     }
     RCSOFTCHECK(rcl_publish(&publisher, &step_joint_feedback, NULL));
   }
-}
-
-void setup() {
-  // Create mutexes for thread-safe access
-  speedMutex = xSemaphoreCreateMutex();
-  debugDataMutex = xSemaphoreCreateMutex();
-  if (speedMutex == NULL || debugDataMutex == NULL) {
-    Serial.println("[ERROR] Failed to create mutexes.");
-    error_loop();
-  }
-
-  // Config Stepper & Motor Hardware
-  Wire.begin(AS5600_SDA1, AS5600_SCL1);
-  Wire.setClock(400000);
-  
-  Wire1.begin(AS5600_SDA2, AS5600_SCL2);
-  Wire1.setClock(400000);
-
-  pinMode(TB6600_ENA1, OUTPUT);
-  pinMode(TB6600_DIR1, OUTPUT);
-  pinMode(TB6600_PUL1, OUTPUT);
-  digitalWrite(TB6600_ENA1, LOW); 
-  digitalWrite(TB6600_DIR1, LOW);
-
-  pinMode(TB6600_ENA2, OUTPUT);
-  pinMode(TB6600_DIR2, OUTPUT);
-  pinMode(TB6600_PUL2, OUTPUT);
-  digitalWrite(TB6600_ENA2, LOW);
-  digitalWrite(TB6600_DIR2, LOW);
-
-  stepTimer1 = timerBegin(0, 80, true); 
-  timerAttachInterrupt(stepTimer1, &onStepTimer1, true);
-  timerAlarmWrite(stepTimer1, 2000, true);
-  timerAlarmEnable(stepTimer1);
-
-  stepTimer2 = timerBegin(1, 80, true); 
-  timerAttachInterrupt(stepTimer2, &onStepTimer2, true);
-  timerAlarmWrite(stepTimer2, 2000, true);
-  timerAlarmEnable(stepTimer2);
-  
-  motor1 = new MotorController(
-    1, 
-    Wire, 
-    TB6600_PUL1, 
-    TB6600_DIR1, 
-    stepTimer1, 
-    &timerMux1, 
-    5.0
-  );
-  
-  motor2 = new MotorController(
-    2, 
-    Wire1, 
-    TB6600_PUL2,
-    TB6600_DIR2, 
-    stepTimer2, 
-    &timerMux2, 
-    5.0
-  );
-
-  xTaskCreatePinnedToCore(
-    controlTask,   // Task function.
-    "ControlTask", // String with name of task.
-    4096,          // Stack size in bytes.
-    NULL,          // Parameter passed as input of the task
-    5,             // Priority of the task (higher = more priority).
-    NULL,          // Task handle.
-    1              // Core where the task should run
-  );            
-
-  // Config Servos
-  uint16_t minUs = 500; 
-  uint16_t maxUs = 2500;
-  ESP32PWM::allocateTimer(0);
-  ESP32PWM::allocateTimer(1);
-  ESP32PWM::allocateTimer(2);
-  ESP32PWM::allocateTimer(3);
-  servo1.setPeriodHertz(50);
-  servo2.setPeriodHertz(50);
-  servo1.attach(SERVO_PIN1, minUs, maxUs);
-  servo2.attach(SERVO_PIN2, minUs, maxUs);
-
-  // Configure serial transport
-  Serial.begin(115200);
-  set_microros_serial_transports(Serial);
-  delay(2000);
-
-  allocator = rcl_get_default_allocator();
-
-  // Pre-allocate buffers for subscription messages with dynamic arrays
-  step_joint_feedback.position.data = step_joint_positions;
-  step_joint_feedback.position.capacity = 2;
-  step_joint_feedback.position.size = 2;
-
-  step_joint_feedback.velocity.data = step_joint_velocities;
-  step_joint_feedback.velocity.capacity = 2;
-  step_joint_feedback.velocity.size = 2;
-  
-  step_joint_cmd.position.data = step_joint_cmd_positions;
-  step_joint_cmd.position.capacity = 2;
-  step_joint_cmd.position.size = 2;
-
-  step_joint_cmd.velocity.data = step_joint_cmd_velocities;
-  step_joint_cmd.velocity.capacity = 2;
-  step_joint_cmd.velocity.size = 2;
-
-  gripper_cmd.data.data = gripper_cmd_data;
-  gripper_cmd.data.capacity = 2;
-  gripper_cmd.data.size = 2;
-
-  // create init_options
-  RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
-
-  // create node
-  RCCHECK(rclc_node_init_default(&node, "stepper_control", "", &support));
-
-  // create publisher
-  RCCHECK(rclc_publisher_init_default(
-    &publisher,
-    &node,
-    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, JointState),
-    "step_joint_feedback"));
-
-  // create timer,
-  RCCHECK(rclc_timer_init_default2(
-    &timer,
-    &support,
-    RCL_MS_TO_NS(1000 / publishFreq),
-    timer_callback,
-    true));
-
-  // create subscriber
-  RCCHECK(rclc_subscription_init_default(
-    &step_joint_subscriber,
-    &node,
-    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, JointState),
-    "step_joint_command"));
-  
-  RCCHECK(rclc_subscription_init_default(
-    &gripper_subscriber,
-    &node,
-    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt16MultiArray),
-    "gripper_command"));
-
-  RCCHECK(rclc_executor_init(&executor, &support.context, 3, &allocator));
-  RCCHECK(rclc_executor_add_timer(&executor, &timer));
-  RCCHECK(rclc_executor_add_subscription(&executor, &step_joint_subscriber, &step_joint_cmd, step_joint_cmd_callback, ON_NEW_DATA));
-  RCCHECK(rclc_executor_add_subscription(&executor, &gripper_subscriber, &gripper_cmd, gripper_cmd_callback, ON_NEW_DATA));
-}
-
-void loop() {
-  RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10)));
 }

@@ -39,9 +39,9 @@ class MotorControl(Node):
         self.lower_limit = np.array([-np.deg2rad(180), np.deg2rad(-180), np.deg2rad(-5), np.deg2rad(-180)]) + threshold
 
         self.create_subscription(JointState, 'motor', self.motor_callback, 10)
-        self.create_subscription(JointState, 'step_joint_states', self.step_joint_state_callback, 10)
+        self.create_subscription(JointState, 'step_joint_feedback', self.step_joint_feedback_callback, 10)
         self.feedback_publisher = self.create_publisher(JointState, 'joint_states', 10)
-        self.step_cmd_publisher = self.create_publisher(JointState, 'step_joint_cmd', 10)
+        self.step_cmd_publisher = self.create_publisher(JointState, 'step_joint_command', 10)
         self.create_timer(1.0/freq, self.publish_feedback)
         self.create_service(Trigger, 'stop', self.stop_callback)
         # self.create_service(Trigger, 'reset', self.reset_callback)
@@ -77,13 +77,15 @@ class MotorControl(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to save joint positions: {e}")
 
-    def step_joint_state_callback(self, msg: JointState):
-        joint5_speed = 0.5 * (msg.velocity[4] + msg.velocity[5]) / self.gear_ratio[4]
-        joint6_speed = 0.5 * (msg.velocity[4] - msg.velocity[5]) / self.gear_ratio[5]
-        joint5_pos = 0.5 * (msg.position[4] + msg.position[5]) / self.gear_ratio[4]
-        joint6_pos = 0.5 * (msg.position[4] - msg.position[5]) / self.gear_ratio[5]
-        self.joint_position[4+self.n:6+self.n] = self.joint_position_offset[4+self.n:6+self.n] + [joint5_pos, joint6_pos]
-        self.joint_speed[4+self.n:6+self.n] = [joint5_speed, joint6_speed]
+    def step_joint_feedback_callback(self, msg: JointState):
+        joint_speed = np.zeros(2)
+        joint_pos = np.zeros(2)
+        joint_speed[0] = 0.5 * (msg.velocity[0] + msg.velocity[1]) / self.gear_ratio[4]
+        joint_speed[1] = 0.5 * (msg.velocity[0] - msg.velocity[1]) / self.gear_ratio[5]
+        joint_pos[0] = 0.5 * (msg.position[0] + msg.position[1]) / self.gear_ratio[4]
+        joint_pos[1] = 0.5 * (msg.position[0] - msg.position[1]) / self.gear_ratio[5]
+        self.joint_position[4+self.n:6+self.n] = self.joint_position_offset[4+self.n:6+self.n] + joint_pos
+        self.joint_speed[4+self.n:6+self.n] = joint_speed
 
     def publish_feedback(self):
         motor_rev = np.zeros(4)

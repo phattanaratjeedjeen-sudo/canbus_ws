@@ -17,7 +17,7 @@ struct MotorDebugData {
   float_t filteredSpeed = 0.0;
   float_t commandSpeed = 0.0;
   float_t dt = 0.0;
-  float_t turn = 0.0;  // total angle in revolutions
+  float_t turn = 0.0; 
 };
 
 class MotorController {

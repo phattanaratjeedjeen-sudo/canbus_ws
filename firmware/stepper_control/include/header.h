@@ -1,5 +1,8 @@
 // base
 #include <Arduino.h>
+#include <esp_task_wdt.h>
+#include <driver/gpio.h>
+#include <hal/gpio_ll.h>
 #include <micro_ros_platformio.h>
 
 // gripper
