@@ -163,10 +163,11 @@ void setup() {
   success &= rosidl_runtime_c__double__Sequence__init(&step_joint_feedback.position, 2);
   success &= rosidl_runtime_c__double__Sequence__init(&step_joint_feedback.velocity, 2);
   
-  // ---> ADD THIS BLOCK FOR THE SUBSCRIBER <---
   success &= rosidl_runtime_c__String__Sequence__init(&step_joint_cmd.name, 2);
   success &= rosidl_runtime_c__double__Sequence__init(&step_joint_cmd.position, 2);
   success &= rosidl_runtime_c__double__Sequence__init(&step_joint_cmd.velocity, 2);
+  
+  success &= rosidl_runtime_c__uint16__Sequence__init(&gripper_cmd.data, 2);
   // -------------------------------------------
 
   if (!success) {
