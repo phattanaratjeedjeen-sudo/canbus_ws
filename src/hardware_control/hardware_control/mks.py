@@ -39,7 +39,10 @@ class MKS():
         timeout = 0.005
         start_time = time.time()
         while time.time() - start_time < timeout:
-            msg = self.bus.recv(0.001)
+            try:
+                msg = self.bus.recv(0.001)
+            except (ValueError, can.CanError):
+                continue
             if msg is not None and msg.arbitration_id == canID and msg.data[0] == code:
                 rmp = int.from_bytes(msg.data[1:3], byteorder='big', signed=True)
                 return rmp
@@ -52,7 +55,10 @@ class MKS():
         timeout = 0.005
         start_time = time.time()
         while time.time() - start_time < timeout:
-            msg = self.bus.recv(0.001)
+            try:
+                msg = self.bus.recv(0.001)
+            except (ValueError, can.CanError):
+                continue
             if msg is not None and msg.arbitration_id == canID and msg.data[0] == code:
                 carry = int.from_bytes(msg.data[1:5], byteorder='big', signed=True)
                 encoder = int.from_bytes(msg.data[5:7], byteorder='big', signed=False)
@@ -66,7 +72,10 @@ class MKS():
         timeout = 0.005
         start_time = time.time()
         while time.time() - start_time < timeout:
-            msg = self.bus.recv(0.001)
+            try:
+                msg = self.bus.recv(0.001)
+            except (ValueError, can.CanError):
+                continue
             if msg is not None and msg.arbitration_id == canID and msg.data[0] == code:
                 encoder = int.from_bytes(msg.data[1:7], byteorder='big', signed=True)
                 return encoder

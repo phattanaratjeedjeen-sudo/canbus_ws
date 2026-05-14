@@ -46,7 +46,7 @@ class MotorControl(Node):
         self.create_service(Trigger, 'stop', self.stop_callback)
         # self.create_service(Trigger, 'reset', self.reset_callback)
         # self.create_service(Trigger, 'set_home' ,self.set_home_callback)
-        # self.create_service(Trigger, 'go_home', self.go_home_callback)
+        self.create_service(Trigger, 'go_home', self.go_home_callback)
 
         self.get_logger().info("Motor Control Node: RUNNING...")
 
@@ -100,14 +100,14 @@ class MotorControl(Node):
         joint_delta[0] = motor_rev[0] / self.gear_ratio[0]      # j1
         joint_delta[1] = -motor_rev[1] / self.gear_ratio[1]     # j2
         joint_delta[2] = motor_rev[2] / self.gear_ratio[2]      # j3
-        joint_delta[3] = motor_rev[3] / self.gear_ratio[3]      # j4
+        joint_delta[3] = -motor_rev[3] / self.gear_ratio[3]      # j4
         joint_delta_rad = joint_delta * 2 * np.pi
         self.joint_position[0+self.n:4+self.n] = self.joint_position_offset[0+self.n:4+self.n] + joint_delta_rad
 
         self.joint_speed[0] = motor_speed[0] / self.gear_ratio[0]    # j1
-        self.joint_speed[1] = motor_speed[1] / self.gear_ratio[1]    # j2
+        self.joint_speed[1] = -motor_speed[1] / self.gear_ratio[1]    # j2
         self.joint_speed[2] = motor_speed[2] / self.gear_ratio[2]    # j3
-        self.joint_speed[3] = motor_speed[3] / self.gear_ratio[3]    # j4
+        self.joint_speed[3] = -motor_speed[3] / self.gear_ratio[3]    # j4
         self.joint_speed[0+self.n:4+self.n] /= 30 / np.pi                          # convert from rpm to rad/s
 
         msg = JointState()
@@ -141,21 +141,21 @@ class MotorControl(Node):
     #     response.message = "Home position set"
     #     return response
     
-    # def go_home_callback(self, request, response):
-    #     response.success = True
-    #     response.message = "Going to home position"
-    #     target = np.zeros(4)
-    #     mask = np.array([1, -1, -1, -1])
-    #     target[0] = self.joint_position[0] * self.gear_ratio[0]     # j1
-    #     target[1] = -self.joint_position[1] * self.gear_ratio[1]    # j2
-    #     target[2] = -self.joint_position[2] * self.gear_ratio[2]    # j3
-    #     target[3] = -self.joint_position[3] * self.gear_ratio[3]    # j4
-    #     target *= 16384 / (2 * np.pi)
+    def go_home_callback(self, request, response):
+        response.success = True
+        response.message = "Going to home position"
+        target = np.zeros(4)
+        mask = np.array([1, -1, -1, -1])
+        target[0] = self.joint_position[0+self.n] * self.gear_ratio[0]     # j1
+        target[1] = -self.joint_position[1+self.n] * self.gear_ratio[1]    # j2
+        target[2] = -self.joint_position[2+self.n] * self.gear_ratio[2]    # j3
+        target[3] = self.joint_position[3+self.n] * self.gear_ratio[3]    # j4
+        target *= 16384 / (2 * np.pi)
 
-    #     for i, id in enumerate(self.canID):
-    #         self.mks.go2pos(canID=id, target_pos=int(target[i]), speed=int(5*self.gear_ratio[i]), acc=self.acc)
+        for i, id in enumerate(self.canID):
+            self.mks.go2pos(canID=id, target_pos=int(target[i]), speed=int(5*self.gear_ratio[i]), acc=self.acc)
 
-    #     return response
+        return response
     
     def motor_callback(self, msg: JointState):
         mask = np.array([1, -1, -1, 1])
@@ -172,13 +172,14 @@ class MotorControl(Node):
         for i, id in enumerate(self.canID):
             can_move_up = (self.joint_position[i+self.n] < self.upper_limit[i] or motor_speed[i]*mask[i] < 0)
             can_move_down = (self.joint_position[i+self.n] > self.lower_limit[i] or motor_speed[i]*mask[i] > 0)
-            speed = int(motor_speed[i] * 60 / (2 * np.pi)) * int(can_move_up and can_move_down)     # convert to rpm
+            # speed = int(motor_speed[i] * 60 / (2 * np.pi)) * int(can_move_up and can_move_down)     # convert to rpm
+            speed = int(motor_speed[i] * 60 / (2 * np.pi))
             speed = max(-1200, min(1200, speed))
             self.mks.send_speed(canID=id, speed=speed, acc=self.acc) 
 
     def publish_step_cmd(self, motor_speed):
         msg = JointState()
-        mask = np.array([1, 1])
+        mask = np.array([1, -1])
         for i in range(len(motor_speed)):
             can_move_up = (self.joint_position[i+self.n] < self.upper_limit[i] or motor_speed[i]*mask[i] < 0)
             can_move_down = (self.joint_position[i+self.n] > self.lower_limit[i] or motor_speed[i]*mask[i] > 0)

@@ -20,6 +20,9 @@
 #include <std_msgs/msg/u_int16_multi_array.h>
 #include <sensor_msgs/msg/joint_state.h>
 
+// micro ros service server
+#include <std_srvs/srv/trigger.h>
+
 #define AS5600_SDA1 21  
 #define AS5600_SCL1 22  
 #define TB6600_ENA1 26  
@@ -42,6 +45,10 @@ portMUX_TYPE timerMux2 = portMUX_INITIALIZER_UNLOCKED;
 float_t setSpeed1 = 50.0;
 float_t setSpeed2 = 50.0;
 
+float_t g_motor1_target = 0.0;
+float_t g_motor2_target = 0.0;
+bool position_mode = false;
+
 # define SERVO_PIN1 18
 # define SERVO_PIN2 19
 
@@ -55,6 +62,12 @@ rcl_subscription_t step_joint_subscriber;
 sensor_msgs__msg__JointState step_joint_cmd;
 rcl_subscription_t gripper_subscriber;
 std_msgs__msg__UInt16MultiArray gripper_cmd;
+rcl_subscription_t joint_subscriber;
+sensor_msgs__msg__JointState joint_position;
+
+rcl_service_t trigger_service;
+std_srvs__srv__Trigger_Request trigger_request;
+std_srvs__srv__Trigger_Response trigger_response;
 
 rclc_executor_t executor;
 rclc_support_t support;
@@ -72,8 +85,10 @@ void setup();
 void error_loop();
 void publishTimerCallback(rcl_timer_t * timer, int64_t last_call_time);
 void controlTimerCallback(rcl_timer_t * timer, int64_t last_call_time);
+void trigger_service_callback(const void * req, void * res);
 void gripper_cmd_callback(const void * msgin);
 void step_joint_cmd_callback(const void * msgin);
+void joint_position_callback(const void * msgin);
 void grip(int16_t angle1, int16_t angle2);
 uint16_t readRawAngle(TwoWire &wire);
 void controlMotor(int motorID, float_t setSpeed, TwoWire &wire, uint8_t pulPin, uint8_t dirPin, hw_timer_t *timer, portMUX_TYPE *mux);
@@ -125,12 +140,10 @@ void motorSetup() {
 void ISRSetup() {
   stepTimer1 = timerBegin(0, 80, true); 
   timerAttachInterrupt(stepTimer1, &onStepTimer1, true);
-  // timerAlarmWrite(stepTimer1, 2000, true);
   timerAlarmEnable(stepTimer1);
 
   stepTimer2 = timerBegin(1, 80, true); 
   timerAttachInterrupt(stepTimer2, &onStepTimer2, true);
-  // timerAlarmWrite(stepTimer2, 2000, true);
   timerAlarmEnable(stepTimer2);
 }
 
@@ -140,7 +153,7 @@ void setup() {
 
   Serial.begin(115200);
   set_microros_serial_transports(Serial);
-  delay(2000);
+  delay(1000);
 
   allocator = rcl_get_default_allocator();
 
@@ -157,7 +170,6 @@ void setup() {
     ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, JointState),
     "step_joint_feedback"));
 
-
   rosidl_runtime_c__String__Sequence__init(&step_joint_feedback.name, 2);
   rosidl_runtime_c__String__assign(&step_joint_feedback.name.data[0], "motor1");
   rosidl_runtime_c__String__assign(&step_joint_feedback.name.data[1], "motor2");
@@ -167,7 +179,11 @@ void setup() {
   rosidl_runtime_c__String__Sequence__init(&step_joint_cmd.name, 2);
   rosidl_runtime_c__double__Sequence__init(&step_joint_cmd.position, 2);
   rosidl_runtime_c__double__Sequence__init(&step_joint_cmd.velocity, 2);
-  
+
+  rosidl_runtime_c__String__Sequence__init(&joint_position.name, 2);
+  rosidl_runtime_c__double__Sequence__init(&joint_position.position, 2);
+  rosidl_runtime_c__double__Sequence__init(&joint_position.velocity, 2);
+
   rosidl_runtime_c__uint16__Sequence__init(&gripper_cmd.data, 2);
 
   // create timer,
@@ -200,13 +216,28 @@ void setup() {
     ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, UInt16MultiArray),
     "gripper_command"));
 
+  RCCHECK(rclc_subscription_init_default(
+    &joint_subscriber,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, JointState),
+    "joint_states"));
+
+  // create service
+  RCCHECK(rclc_service_init_default(
+    &trigger_service,
+    &node,
+    ROSIDL_GET_SRV_TYPE_SUPPORT(std_srvs, srv, Trigger),
+    "go_home"));
+
   // create executor
-  RCCHECK(rclc_executor_init(&executor, &support.context, 5, &allocator));
+  RCCHECK(rclc_executor_init(&executor, &support.context, 7, &allocator));
   RCCHECK(rclc_executor_add_timer(&executor, &publishTimer));
   RCCHECK(rclc_executor_add_timer(&executor, &controlTimer));
   RCCHECK(rclc_executor_add_subscription(&executor, &step_joint_subscriber, &step_joint_cmd, step_joint_cmd_callback, ON_NEW_DATA));
   RCCHECK(rclc_executor_add_subscription(&executor, &gripper_subscriber, &gripper_cmd, gripper_cmd_callback, ON_NEW_DATA));
-  
+  RCCHECK(rclc_executor_add_subscription(&executor, &joint_subscriber, &joint_position, joint_position_callback, ON_NEW_DATA));
+  RCCHECK(rclc_executor_add_service(&executor, &trigger_service, &trigger_request, &trigger_response, trigger_service_callback));
+
   ISRSetup();
 }
 
@@ -228,6 +259,44 @@ void publishTimerCallback(rcl_timer_t * timer, int64_t last_call_time) {
 void controlTimerCallback(rcl_timer_t * timer, int64_t last_call_time) {
   RCLC_UNUSED(last_call_time);
   if (timer != NULL) {
+    if (position_mode) {
+      static unsigned long lastPosTime = 0;
+      unsigned long now = micros();
+      float_t dt = (now - lastPosTime) / 1000000.0;
+      if (lastPosTime == 0) dt = 0.005; // 200Hz
+      lastPosTime = now;
+
+      static float_t pos_integral1 = 0.0, pos_prevError1 = 0.0;
+      static float_t pos_integral2 = 0.0, pos_prevError2 = 0.0;
+
+      static float_t offset1 = g_motor1_target; 
+      static float_t offset2 = g_motor2_target;
+
+      float_t current_pos1 = debugData1[4] + offset1;
+      float_t current_pos2 = debugData2[4] + offset2;
+
+      float_t error1 = g_motor1_target - current_pos1;
+      float_t error2 = g_motor2_target - current_pos2;
+
+      pos_integral1 += error1 * dt;
+      pos_integral2 += error2 * dt;
+
+      float_t derivative1 = (error1 - pos_prevError1) / dt;
+      float_t derivative2 = (error2 - pos_prevError2) / dt;
+
+      pos_prevError1 = error1;
+      pos_prevError2 = error2;
+
+      float_t Kp = 5.0, Ki = 0.0, Kd = 0.1;
+
+      setSpeed1 = Kp * error1 + Ki * pos_integral1 + Kd * derivative1;
+      setSpeed2 = Kp * error2 + Ki * pos_integral2 + Kd * derivative2;
+      
+      // limit speed
+      setSpeed1 = fmaxf(fminf(setSpeed1, 5.0), -5.0);
+      setSpeed2 = fmaxf(fminf(setSpeed2, 5.0), -5.0);
+    }
+
     controlMotor(1, setSpeed1, Wire, TB6600_PUL1, TB6600_DIR1, stepTimer1, &timerMux1);
     controlMotor(2, setSpeed2, Wire1, TB6600_PUL2, TB6600_DIR2, stepTimer2, &timerMux2);
   }
@@ -260,6 +329,7 @@ void grip(int16_t angle1, int16_t angle2)
 void step_joint_cmd_callback(const void * msgin) {
   const sensor_msgs__msg__JointState * msg = (const sensor_msgs__msg__JointState *) msgin;
   if (msg->velocity.size == 2) {
+    position_mode = false;
     setSpeed1 = msg->velocity.data[0];
     setSpeed2 = msg->velocity.data[1];    
   } else {
@@ -407,4 +477,25 @@ void controlMotor(int motorID, float_t setSpeed, TwoWire &wire, uint8_t pulPin, 
     debugData2[3] = dt;
     debugData2[4] = totalRadAngle2 / (2.0 * PI);
   }
+}
+
+void trigger_service_callback(const void * req, void * res) {
+  const std_srvs__srv__Trigger_Request * request = (const std_srvs__srv__Trigger_Request *) req;
+  std_srvs__srv__Trigger_Response * response = (std_srvs__srv__Trigger_Response *) res;
+
+  position_mode = true;
+
+  // For demonstration, we simply set success to true and return a message.
+  response->success = true;
+  rosidl_runtime_c__String__assign(&response->message, "Trigger received, position mode enabled.");
+}
+
+void joint_position_callback(const void * msgin) {
+  const sensor_msgs__msg__JointState * msg = (const sensor_msgs__msg__JointState *) msgin;
+  float_t joint5_position = msg->position.data[5];
+  float_t joint6_position = msg->position.data[6];
+
+  // convert joint_position to motor rev
+  g_motor1_target = - (joint5_position + joint6_position) * 67.82;
+  g_motor2_target = - (joint5_position - joint6_position) * 67.82;
 }
