@@ -61,7 +61,15 @@ rcl_node_t node;
 rcl_timer_t publishTimer; 
 rcl_timer_t controlTimer; 
 
-float_t debugData1[5], debugData2[5];
+struct MotorDebugData {
+    float_t targetSpeed;
+    float_t filteredSpeed;
+    float_t commandSpeed;
+    float_t dt;
+    float_t numRevolutions;
+};
+
+MotorDebugData debugData1, debugData2;
 
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
@@ -73,8 +81,6 @@ void controlTimerCallback(rcl_timer_t * timer, int64_t last_call_time);
 void gripper_cmd_callback(const void * msgin);
 void step_joint_cmd_callback(const void * msgin);
 void grip(int16_t angle1, int16_t angle2);
-uint16_t readRawAngle(TwoWire &wire);
-void controlMotor(int motorID, float_t setSpeed, TwoWire &wire, uint8_t pulPin, uint8_t dirPin, hw_timer_t *timer, portMUX_TYPE *mux);
 
 void IRAM_ATTR onStepTimer1();
 void IRAM_ATTR onStepTimer2();
@@ -82,8 +88,6 @@ void IRAM_ATTR onStepTimer2();
 void gripperSetup();
 void motorSetup();
 void ISRSetup();
-void setStepperSpeed1(uint32_t usInterval1);
-void setStepperSpeed2(uint32_t usInterval2);
 
 void error_loop() {
   while(1) {
@@ -209,22 +213,148 @@ void loop() {
 void publishTimerCallback(rcl_timer_t * timer, int64_t last_call_time) {
   RCLC_UNUSED(last_call_time);
   if (timer != NULL) {
-    step_joint_feedback.position.data[0] = debugData1[4]; 
-    step_joint_feedback.position.data[1] = debugData2[4];
-    step_joint_feedback.velocity.data[0] = debugData1[1];
-    step_joint_feedback.velocity.data[1] = debugData2[1];
+    step_joint_feedback.position.data[0] = debugData1.numRevolutions; 
+    step_joint_feedback.position.data[1] = debugData2.numRevolutions;
+    step_joint_feedback.velocity.data[0] = debugData1.filteredSpeed;
+    step_joint_feedback.velocity.data[1] = debugData2.filteredSpeed;
     RCSOFTCHECK(rcl_publish(&publisher, &step_joint_feedback, NULL));
   }
 }
 
+// -------------------------------- motor control class --------------------------------
+class StepperController {
+private:
+    uint8_t motorID;
+    TwoWire* wire;
+    uint8_t pulPin;
+    uint8_t dirPin;
+    hw_timer_t** timer;
+    portMUX_TYPE* mux;
+    MotorDebugData* debugData;
+    
+    float_t previousRadAngle = 0.0;
+    float_t totalRadAngle = 0.0;
+    float_t previousFilteredSpeed = 0.0;
+    unsigned long lastTime = 0;
+    float_t targetSpeed = 0.0;
+    float_t integral = 0.0;
+    float_t previousError = 0.0;
+    boolean isTimerRunning = true;
+    
+    float_t cutoffFreq = 5.0;
+    float_t accelation = 20.0;
+    float_t Kp = 0.3;
+    float_t Ki = 0.2;
+    float_t Kd = 0.01;
+
+    uint16_t readRawAngle() {
+        uint16_t rawAngle = 0;
+        wire->beginTransmission(AS5600_ADDR);
+        wire->write(RAW_ANGLE_MSB_REG);
+        wire->endTransmission(false);
+        wire->requestFrom(AS5600_ADDR, 2);
+        if (wire->available() >= 2) {
+            uint8_t msb = wire->read();
+            uint8_t lsb = wire->read();
+            rawAngle = (msb << 8) | lsb;
+        }
+        return rawAngle;
+    }
+
+    void setStepperSpeed(uint32_t usInterval) {
+        portENTER_CRITICAL(mux);
+        timerAlarmWrite(*timer, usInterval, true);
+        portEXIT_CRITICAL(mux);
+    }
+
+public:
+    StepperController(uint8_t id, TwoWire& w, uint8_t pPin, uint8_t dPin, hw_timer_t** tmr, portMUX_TYPE* mx, MotorDebugData* dbgData) 
+        : motorID(id), wire(&w), pulPin(pPin), dirPin(dPin), timer(tmr), mux(mx), debugData(dbgData) {}
+
+    void control(float_t setSpeed) {
+        float_t radAngle = (readRawAngle() / 4096.0) * 2.0 * PI;
+        float_t deltaAngle = remainder(radAngle - previousRadAngle, 2.0 * PI);
+        totalRadAngle += deltaAngle;
+        previousRadAngle = radAngle;
+
+        float_t tau = 1.0 / (2.0 * PI * cutoffFreq);
+        unsigned long now = micros();
+        float_t dt = (now - lastTime) / 1000000.0;
+        if (dt <= 0.0) dt = 0.0001; 
+        lastTime = now;
+        
+        float_t alpha = dt / (tau + dt);
+        float_t speed = deltaAngle / dt;
+        float_t filteredSpeed = previousFilteredSpeed + alpha * (speed - previousFilteredSpeed);
+        previousFilteredSpeed = filteredSpeed;
+
+        float_t deltaSpeed = accelation * dt;
+        float_t diffSpeed = setSpeed - targetSpeed;
+        float_t changedSpeed = fmaxf(-deltaSpeed, fminf(diffSpeed, deltaSpeed));
+        targetSpeed += changedSpeed;
+
+        if (abs(setSpeed) < 0.01 && abs(targetSpeed) < 0.05) {
+            targetSpeed = 0.0;
+        }
+
+        float_t error = targetSpeed - filteredSpeed;
+        
+        if (targetSpeed == 0.0) {
+            integral = 0.0;
+        } else {
+            integral += (error * dt);
+            integral = fmaxf(fminf(integral, 50.0), -50.0);
+        }
+        
+        float_t derivative = (error - previousError) / dt;
+        previousError = error;
+
+        float_t outputSpeed = (Kp * error) + (Ki * integral) + (Kd * derivative);
+        outputSpeed = fmaxf(fminf(outputSpeed, 4.0), -4.0);
+        
+        float_t commandSpeed = fmaxf(fminf(targetSpeed + outputSpeed, 100.0), -100.0);
+
+        if (abs(commandSpeed) <= 0.1) {
+            if (isTimerRunning) {
+                timerAlarmDisable(*timer);
+                isTimerRunning = false;
+            }
+            return;
+        } else {
+            if (!isTimerRunning) {
+                timerAlarmEnable(*timer);
+                isTimerRunning = true;
+            }
+        }
+
+        uint32_t stepFreq = (uint32_t)(abs(commandSpeed) * 1600.0 / (2 * PI));
+        if (stepFreq == 0) stepFreq = 1;
+        uint32_t usInterval = 1000000 / (stepFreq * 2);
+        if (usInterval < 20) usInterval = 20;
+
+        gpio_set_level((gpio_num_t)dirPin, commandSpeed > 0 ? 0 : 1);
+        setStepperSpeed(usInterval);
+        
+        if (debugData) {
+            debugData->targetSpeed = targetSpeed;
+            debugData->filteredSpeed = filteredSpeed;
+            debugData->commandSpeed = commandSpeed;
+            debugData->dt = dt;
+            debugData->numRevolutions = totalRadAngle / (2.0 * PI);
+        }
+    }
+};
+
+StepperController motor1(1, Wire, TB6600_PUL1, TB6600_DIR1, &stepTimer1, &timerMux1, &debugData1);
+StepperController motor2(2, Wire1, TB6600_PUL2, TB6600_DIR2, &stepTimer2, &timerMux2, &debugData2);
+
 void controlTimerCallback(rcl_timer_t * timer, int64_t last_call_time) {
   RCLC_UNUSED(last_call_time);
   if (timer != NULL) {
-    controlMotor(1, setSpeed1, Wire, TB6600_PUL1, TB6600_DIR1, stepTimer1, &timerMux1);
-    controlMotor(2, setSpeed2, Wire1, TB6600_PUL2, TB6600_DIR2, stepTimer2, &timerMux2);
+    motor1.control(setSpeed1);
+    motor2.control(setSpeed2);
   }
 }
-
 
 // -------------------------------- gripper control --------------------------------
 void gripper_cmd_callback(const void * msgin) {
@@ -273,145 +403,4 @@ void IRAM_ATTR onStepTimer2() {
   state = !state;
   gpio_set_level((gpio_num_t)TB6600_PUL2, state ? 1 : 0);
   portEXIT_CRITICAL_ISR(&timerMux2);
-}
-
-void setStepperSpeed1(uint32_t usInterval) {
-  portENTER_CRITICAL(&timerMux1);
-  timerAlarmWrite(stepTimer1, usInterval, true);
-  portEXIT_CRITICAL(&timerMux1);
-}
-
-void setStepperSpeed2(uint32_t usInterval) {
-  portENTER_CRITICAL(&timerMux2);
-  timerAlarmWrite(stepTimer2, usInterval, true);
-  portEXIT_CRITICAL(&timerMux2);
-}
-
-uint16_t readRawAngle(TwoWire &wire) {
-  uint16_t rawAngle = 0;
-  wire.beginTransmission(AS5600_ADDR);
-  wire.write(RAW_ANGLE_MSB_REG);
-  wire.endTransmission(false);
-  wire.requestFrom(AS5600_ADDR, 2);
-  if (wire.available() >= 2) {
-    uint8_t msb = wire.read();
-    uint8_t lsb = wire.read();
-    rawAngle = (msb << 8) | lsb;
-  }
-  return rawAngle;
-}
-
-void controlMotor(int motorID, float_t setSpeed, TwoWire &wire, uint8_t pulPin, uint8_t dirPin, hw_timer_t *timer, portMUX_TYPE *mux) {
-  float_t radAngle = (readRawAngle(wire) / 4096.0) * 2.0 * PI;
-  static float_t previousRadAngle1 = 0.0;
-  static float_t totalRadAngle1 = 0.0;
-  static float_t previousRadAngle2 = 0.0;
-  static float_t totalRadAngle2 = 0.0;
-  
-  float_t &previousRadAngle = (motorID == 1) ? previousRadAngle1 : previousRadAngle2;
-  float_t &totalRadAngle = (motorID == 1) ? totalRadAngle1 : totalRadAngle2;
-  
-  float_t deltaAngle = remainder(radAngle - previousRadAngle, 2.0 * PI);
-  totalRadAngle += deltaAngle;
-  previousRadAngle = radAngle;
-
-  static float_t previousFilteredSpeed1 = 0.0;
-  static float_t previousFilteredSpeed2 = 0.0;
-  float_t cutoffFreq = 5.0; // Same for both motors
-  float_t tau = 1.0 / (2.0 * PI * cutoffFreq);
-  static unsigned long lastTime1 = 0, lastTime2 = 0;
-  unsigned long now = micros();
-  float_t dt = (motorID == 1) ? (now - lastTime1) / 1000000.0 : (now - lastTime2) / 1000000.0;
-  if (dt <= 0.0) dt = 0.0001; // Avoid division by zero
-  if (motorID == 1) lastTime1 = now; else lastTime2 = now;
-  
-  float_t &previousFilteredSpeed = (motorID == 1) ? previousFilteredSpeed1 : previousFilteredSpeed2;
-  float_t alpha = dt / (tau + dt);
-  float_t speed = deltaAngle / dt;
-  float_t filteredSpeed = previousFilteredSpeed + alpha * (speed - previousFilteredSpeed);
-  previousFilteredSpeed = filteredSpeed;
-
-  static float_t targetSpeed1 = 0.0;
-  static float_t targetSpeed2 = 0.0;
-  float_t &targetSpeed = (motorID == 1) ? targetSpeed1 : targetSpeed2;
-  
-  static float_t accelation = 20.0; // Lowered from 50 to prevent stalls!
-  float_t deltaSpeed = accelation * dt;
-  float_t diffSpeed = setSpeed - targetSpeed;
-  float_t changedSpeed = fmaxf(-deltaSpeed, fminf(diffSpeed, deltaSpeed));
-  targetSpeed += changedSpeed;
-
-  // Snap to 0 when very close to 0 to avoid drifting
-  if (abs(setSpeed) < 0.01 && abs(targetSpeed) < 0.05) {
-      targetSpeed = 0.0;
-  }
-
-  static float_t integral1 = 0.0, previousError1 = 0.0;
-  static float_t integral2 = 0.0, previousError2 = 0.0;
-  float_t &integral = (motorID == 1) ? integral1 : integral2;
-  float_t &previousError = (motorID == 1) ? previousError1 : previousError2;
-  
-  float_t error = targetSpeed - filteredSpeed;
-  
-  // Standard PID without hard resetting on large errors
-  if (targetSpeed == 0.0) {
-    // If we want to completely stop, clear the integral to prevent windup moving the motor
-    integral = 0.0;
-  } else {
-    integral += (error * dt);
-    integral = fmaxf(fminf(integral, 50.0), -50.0); // Clamp integral windup
-  }
-  
-  float_t derivative = (error - previousError) / dt;
-  previousError = error;
-
-  float_t Kp = (motorID == 1) ? 0.3 : 0.3; // Less aggressive proportional
-  float_t Ki = (motorID == 1) ? 0.2 : 0.2; // Slightly more integral to correct offset
-  float_t Kd = (motorID == 1) ? 0.01 : 0.01;
-  
-  float_t outputSpeed = (Kp * error) + (Ki * integral) + (Kd * derivative);
-  
-  // Limit the PID's ability to "push" the stepper too hard, which causes stalling
-  outputSpeed = fmaxf(fminf(outputSpeed, 4.0), -4.0);
-  
-  float_t commandSpeed = fmaxf(fminf(targetSpeed + outputSpeed, 100.0), -100.0);
-
-  static boolean isTimerRunning1 = true, isTimerRunning2 = true;
-  boolean &isTimerRunning = (motorID == 1) ? isTimerRunning1 : isTimerRunning2;
-  
-  if (abs(commandSpeed) <= 0.1) {
-    if (isTimerRunning) {
-      timerAlarmDisable(timer);
-      isTimerRunning = false;
-    }
-    return;
-  } else {
-    if (!isTimerRunning) {
-      timerAlarmEnable(timer);
-      isTimerRunning = true;
-    }
-  }
-
-  uint32_t stepFreq = (uint32_t)(abs(commandSpeed) * 1600.0 / (2 * PI));
-  if (stepFreq == 0) stepFreq = 1;
-  uint32_t usInterval = 1000000 / (stepFreq * 2);
-  if (usInterval < 20) usInterval = 20; // Cap to 50kHz max to avoid interrupt storm
-
-  gpio_set_level((gpio_num_t)dirPin, commandSpeed > 0 ? 0 : 1);
-  (motorID == 1) ? setStepperSpeed1(usInterval) : setStepperSpeed2(usInterval);
-  
-  // Store values for debugging
-  if (motorID == 1) {
-    debugData1[0] = targetSpeed;
-    debugData1[1] = filteredSpeed;
-    debugData1[2] = commandSpeed;
-    debugData1[3] = dt;
-    debugData1[4] = totalRadAngle1 / (2.0 * PI);
-  } else {
-    debugData2[0] = targetSpeed;
-    debugData2[1] = filteredSpeed;
-    debugData2[2] = commandSpeed;
-    debugData2[3] = dt;
-    debugData2[4] = totalRadAngle2 / (2.0 * PI);
-  }
 }

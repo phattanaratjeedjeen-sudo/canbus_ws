@@ -36,6 +36,7 @@ class MotorControl(Node):
         self.joint_speed = np.zeros(6+self.n)
         self.step_joint_pos = np.zeros(2)
         self.step_joint_speed = np.zeros(2)
+        self.step_joint_pos_offset = np.zeros(2)
         threshold = np.deg2rad(10)
         self.upper_limit = np.array([np.deg2rad(180), np.deg2rad(30), np.deg2rad(150), np.deg2rad(180)]) - threshold
         self.lower_limit = np.array([-np.deg2rad(180), np.deg2rad(-180), np.deg2rad(-5), np.deg2rad(-180)]) + threshold
@@ -80,11 +81,11 @@ class MotorControl(Node):
             self.get_logger().error(f"Failed to save joint positions: {e}")
 
     def step_joint_feedback_callback(self, msg: JointState):
-        self.step_joint_speed[1] = 0.5 * (msg.velocity[0] + msg.velocity[1]) / self.gear_ratio[4]
+        self.step_joint_speed[1] = - (0.5 * (msg.velocity[0] + msg.velocity[1]) / self.gear_ratio[4])
         self.step_joint_speed[0] = 0.5 * (msg.velocity[0] - msg.velocity[1]) / self.gear_ratio[5]
-        self.step_joint_pos[1] = 0.5 * (msg.position[0] + msg.position[1]) / self.gear_ratio[4]
+        self.step_joint_pos[1] = - (0.5 * (msg.position[0] + msg.position[1]) / self.gear_ratio[4])
         self.step_joint_pos[0] = 0.5 * (msg.position[0] - msg.position[1]) / self.gear_ratio[5]
-        self.joint_position[4+self.n:6+self.n] = self.joint_position_offset[4+self.n:6+self.n] + self.step_joint_pos
+        self.joint_position[4+self.n:6+self.n] = self.joint_position_offset[4+self.n:6+self.n] + self.step_joint_pos  - self.step_joint_pos_offset
         self.joint_speed[4+self.n:6+self.n] = self.step_joint_speed
 
     def publish_feedback(self):
@@ -141,8 +142,8 @@ class MotorControl(Node):
                 json.dump(np.zeros_like(self.joint_position).tolist(), f)
         except Exception as e:
             self.get_logger().error(f"Failed to save zero joint positions: {e}")
+        self.step_joint_pos_offset = np.copy(self.step_joint_pos)
         self.step_joint_pos = np.zeros(2)
-        self.step_joint_speed = np.zeros(2)
         self.joint_position_offset = self.load_joint_positions()
         self.joint_position = np.copy(self.joint_position_offset)
         response.success = True
@@ -157,7 +158,7 @@ class MotorControl(Node):
         target[0] = self.joint_position[0+self.n] * self.gear_ratio[0]     # j1
         target[1] = -self.joint_position[1+self.n] * self.gear_ratio[1]    # j2
         target[2] = -self.joint_position[2+self.n] * self.gear_ratio[2]    # j3
-        target[3] = self.joint_position[3+self.n] * self.gear_ratio[3]    # j4
+        target[3] = self.joint_position[3+self.n] * self.gear_ratio[3]     # j4
         target *= 16384 / (2 * np.pi)
 
         for i, id in enumerate(self.canID):
