@@ -34,6 +34,8 @@ class MotorControl(Node):
         self.joint_position_offset = self.load_joint_positions()
         self.joint_position = np.copy(self.joint_position_offset)
         self.joint_speed = np.zeros(6+self.n)
+        self.step_joint_pos = np.zeros(2)
+        self.step_joint_speed = np.zeros(2)
         threshold = np.deg2rad(10)
         self.upper_limit = np.array([np.deg2rad(180), np.deg2rad(30), np.deg2rad(150), np.deg2rad(180)]) - threshold
         self.lower_limit = np.array([-np.deg2rad(180), np.deg2rad(-180), np.deg2rad(-5), np.deg2rad(-180)]) + threshold
@@ -45,7 +47,7 @@ class MotorControl(Node):
         self.create_timer(1.0/freq, self.publish_feedback)
         self.create_service(Trigger, 'stop', self.stop_callback)
         # self.create_service(Trigger, 'reset', self.reset_callback)
-        # self.create_service(Trigger, 'set_home' ,self.set_home_callback)
+        self.create_service(Trigger, 'set_home' ,self.set_home_callback)
         self.create_service(Trigger, 'go_home', self.go_home_callback)
 
         self.get_logger().info("Motor Control Node: RUNNING...")
@@ -78,14 +80,12 @@ class MotorControl(Node):
             self.get_logger().error(f"Failed to save joint positions: {e}")
 
     def step_joint_feedback_callback(self, msg: JointState):
-        joint_speed = np.zeros(2)
-        joint_pos = np.zeros(2)
-        joint_speed[0] = 0.5 * (msg.velocity[0] + msg.velocity[1]) / self.gear_ratio[4]
-        joint_speed[1] = 0.5 * (msg.velocity[0] - msg.velocity[1]) / self.gear_ratio[5]
-        joint_pos[0] = 0.5 * (msg.position[0] + msg.position[1]) / self.gear_ratio[4]
-        joint_pos[1] = 0.5 * (msg.position[0] - msg.position[1]) / self.gear_ratio[5]
-        self.joint_position[4+self.n:6+self.n] = self.joint_position_offset[4+self.n:6+self.n] + joint_pos
-        self.joint_speed[4+self.n:6+self.n] = joint_speed
+        self.step_joint_speed[1] = 0.5 * (msg.velocity[0] + msg.velocity[1]) / self.gear_ratio[4]
+        self.step_joint_speed[0] = 0.5 * (msg.velocity[0] - msg.velocity[1]) / self.gear_ratio[5]
+        self.step_joint_pos[1] = 0.5 * (msg.position[0] + msg.position[1]) / self.gear_ratio[4]
+        self.step_joint_pos[0] = 0.5 * (msg.position[0] - msg.position[1]) / self.gear_ratio[5]
+        self.joint_position[4+self.n:6+self.n] = self.joint_position_offset[4+self.n:6+self.n] + self.step_joint_pos
+        self.joint_speed[4+self.n:6+self.n] = self.step_joint_speed
 
     def publish_feedback(self):
         motor_rev = np.zeros(4)
@@ -135,11 +135,19 @@ class MotorControl(Node):
     #         self.mks.reset_motor(id)
     #     return response
     
-    # def set_home_callback(self, request, response):
-    #     self.save_joint_positions()
-    #     response.success = True
-    #     response.message = "Home position set"
-    #     return response
+    def set_home_callback(self, request, response):
+        try:
+            with open(self.joint_memory, 'w') as f:
+                json.dump(np.zeros_like(self.joint_position).tolist(), f)
+        except Exception as e:
+            self.get_logger().error(f"Failed to save zero joint positions: {e}")
+        self.step_joint_pos = np.zeros(2)
+        self.step_joint_speed = np.zeros(2)
+        self.joint_position_offset = self.load_joint_positions()
+        self.joint_position = np.copy(self.joint_position_offset)
+        response.success = True
+        response.message = "Home position set"
+        return response
     
     def go_home_callback(self, request, response):
         response.success = True
@@ -164,8 +172,8 @@ class MotorControl(Node):
         motor_speed[1] = -msg.velocity[1+self.n] * self.gear_ratio[1]                         
         motor_speed[2] = -msg.velocity[2+self.n] * self.gear_ratio[2]                         
         motor_speed[3] = msg.velocity[3+self.n] * self.gear_ratio[3]
-        motor_speed[4] = msg.velocity[4+self.n] * self.gear_ratio[4] + msg.velocity[5+self.n] * self.gear_ratio[5]    
-        motor_speed[5] = msg.velocity[5+self.n] * self.gear_ratio[4] - msg.velocity[4+self.n] * self.gear_ratio[5]
+        motor_speed[4] = (msg.velocity[4+self.n] * self.gear_ratio[4] - msg.velocity[5+self.n] * self.gear_ratio[5])
+        motor_speed[5] = (-msg.velocity[5+self.n] * self.gear_ratio[4] - msg.velocity[4+self.n] * self.gear_ratio[5])
 
         self.publish_step_cmd(motor_speed=[motor_speed[4], motor_speed[5]])
 
@@ -181,9 +189,10 @@ class MotorControl(Node):
         msg = JointState()
         mask = np.array([1, -1])
         for i in range(len(motor_speed)):
-            can_move_up = (self.joint_position[i+self.n] < self.upper_limit[i] or motor_speed[i]*mask[i] < 0)
-            can_move_down = (self.joint_position[i+self.n] > self.lower_limit[i] or motor_speed[i]*mask[i] > 0)
-            motor_speed[1] = max(-700, min(700, motor_speed[1])) * int(can_move_up and can_move_down)
+            # can_move_up = (self.joint_position[i+self.n] < self.upper_limit[i] or motor_speed[i]*mask[i] < 0)
+            # can_move_down = (self.joint_position[i+self.n] > self.lower_limit[i] or motor_speed[i]*mask[i] > 0)
+            # motor_speed[1] = max(-700, min(700, motor_speed[1])) * int(can_move_up and can_move_down)
+            motor_speed[i] = max(-700, min(700, motor_speed[i]))
         msg.velocity = motor_speed
         self.step_cmd_publisher.publish(msg)
 

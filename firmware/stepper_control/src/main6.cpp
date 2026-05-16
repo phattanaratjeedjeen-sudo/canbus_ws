@@ -22,15 +22,13 @@
 
 #define AS5600_SDA1 21  
 #define AS5600_SCL1 22  
-#define TB6600_ENA1 26  
 #define TB6600_DIR1 27  
 #define TB6600_PUL1 13  
 
 #define AS5600_SDA2 16
-#define AS5600_SCL2 17
-#define TB6600_ENA2 32  
+#define AS5600_SCL2 17 
 #define TB6600_DIR2 33
-#define TB6600_PUL2 15
+#define TB6600_PUL2 32
 
 #define AS5600_ADDR 0x36
 #define RAW_ANGLE_MSB_REG 0x0C
@@ -39,8 +37,8 @@ hw_timer_t * stepTimer1 = NULL;
 hw_timer_t * stepTimer2 = NULL;
 portMUX_TYPE timerMux1 = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE timerMux2 = portMUX_INITIALIZER_UNLOCKED;
-float_t setSpeed1 = 50.0;
-float_t setSpeed2 = 50.0;
+float_t setSpeed1 = 0.0;
+float_t setSpeed2 = 0.0;
 
 # define SERVO_PIN1 18
 # define SERVO_PIN2 19
@@ -107,30 +105,24 @@ void gripperSetup() {
 void motorSetup() {
   Wire.begin(AS5600_SDA1, AS5600_SCL1);
   Wire.setClock(400000);
-  pinMode(TB6600_ENA1, OUTPUT);
   pinMode(TB6600_DIR1, OUTPUT);
   pinMode(TB6600_PUL1, OUTPUT);
-  digitalWrite(TB6600_ENA1, LOW); 
   digitalWrite(TB6600_DIR1, LOW);
 
   Wire1.begin(AS5600_SDA2, AS5600_SCL2);
   Wire1.setClock(400000);
-  pinMode(TB6600_ENA2, OUTPUT);
   pinMode(TB6600_DIR2, OUTPUT);
   pinMode(TB6600_PUL2, OUTPUT);
-  digitalWrite(TB6600_ENA2, LOW);
   digitalWrite(TB6600_DIR2, LOW);
 }
 
 void ISRSetup() {
   stepTimer1 = timerBegin(0, 80, true); 
   timerAttachInterrupt(stepTimer1, &onStepTimer1, true);
-  // timerAlarmWrite(stepTimer1, 2000, true);
   timerAlarmEnable(stepTimer1);
 
   stepTimer2 = timerBegin(1, 80, true); 
   timerAttachInterrupt(stepTimer2, &onStepTimer2, true);
-  // timerAlarmWrite(stepTimer2, 2000, true);
   timerAlarmEnable(stepTimer2);
 }
 
@@ -325,11 +317,12 @@ void controlMotor(int motorID, float_t setSpeed, TwoWire &wire, uint8_t pulPin, 
 
   static float_t previousFilteredSpeed1 = 0.0;
   static float_t previousFilteredSpeed2 = 0.0;
-  float_t cutoffFreq = (motorID == 1) ? 5.0 : 7.0;
+  float_t cutoffFreq = 5.0; // Same for both motors
   float_t tau = 1.0 / (2.0 * PI * cutoffFreq);
   static unsigned long lastTime1 = 0, lastTime2 = 0;
   unsigned long now = micros();
   float_t dt = (motorID == 1) ? (now - lastTime1) / 1000000.0 : (now - lastTime2) / 1000000.0;
+  if (dt <= 0.0) dt = 0.0001; // Avoid division by zero
   if (motorID == 1) lastTime1 = now; else lastTime2 = now;
   
   float_t &previousFilteredSpeed = (motorID == 1) ? previousFilteredSpeed1 : previousFilteredSpeed2;
@@ -342,36 +335,46 @@ void controlMotor(int motorID, float_t setSpeed, TwoWire &wire, uint8_t pulPin, 
   static float_t targetSpeed2 = 0.0;
   float_t &targetSpeed = (motorID == 1) ? targetSpeed1 : targetSpeed2;
   
-  static float_t accelation = 50.0;
+  static float_t accelation = 20.0; // Lowered from 50 to prevent stalls!
   float_t deltaSpeed = accelation * dt;
   float_t diffSpeed = setSpeed - targetSpeed;
   float_t changedSpeed = fmaxf(-deltaSpeed, fminf(diffSpeed, deltaSpeed));
   targetSpeed += changedSpeed;
 
-  static float_t integral1 = 0.0, previousError1 = 0.0, prescale1 = 1.0;
-  static float_t integral2 = 0.0, previousError2 = 0.0, prescale2 = 1.0;
+  // Snap to 0 when very close to 0 to avoid drifting
+  if (abs(setSpeed) < 0.01 && abs(targetSpeed) < 0.05) {
+      targetSpeed = 0.0;
+  }
+
+  static float_t integral1 = 0.0, previousError1 = 0.0;
+  static float_t integral2 = 0.0, previousError2 = 0.0;
   float_t &integral = (motorID == 1) ? integral1 : integral2;
   float_t &previousError = (motorID == 1) ? previousError1 : previousError2;
-  float_t &prescale = (motorID == 1) ? prescale1 : prescale2;
   
   float_t error = targetSpeed - filteredSpeed;
-  static float_t speedGap = 5.0;
-  if (abs(error) <= speedGap) {
-    integral += (error * dt);
-    integral = fmaxf(fminf(integral, 100.0), -100.0);
-    prescale = 1.0;
-  } else {
+  
+  // Standard PID without hard resetting on large errors
+  if (targetSpeed == 0.0) {
+    // If we want to completely stop, clear the integral to prevent windup moving the motor
     integral = 0.0;
-    prescale = abs(1.2 * filteredSpeed / targetSpeed);
+  } else {
+    integral += (error * dt);
+    integral = fmaxf(fminf(integral, 50.0), -50.0); // Clamp integral windup
   }
+  
   float_t derivative = (error - previousError) / dt;
   previousError = error;
 
-  float_t Kp = (motorID == 1) ? 0.5 : 0.5;
-  float_t Ki = (motorID == 1) ? 0.1 : 0.1;
+  float_t Kp = (motorID == 1) ? 0.3 : 0.3; // Less aggressive proportional
+  float_t Ki = (motorID == 1) ? 0.2 : 0.2; // Slightly more integral to correct offset
   float_t Kd = (motorID == 1) ? 0.01 : 0.01;
+  
   float_t outputSpeed = (Kp * error) + (Ki * integral) + (Kd * derivative);
-  float_t commandSpeed = fmaxf(fminf(targetSpeed + outputSpeed, 100.0), -100.0) * prescale;
+  
+  // Limit the PID's ability to "push" the stepper too hard, which causes stalling
+  outputSpeed = fmaxf(fminf(outputSpeed, 4.0), -4.0);
+  
+  float_t commandSpeed = fmaxf(fminf(targetSpeed + outputSpeed, 100.0), -100.0);
 
   static boolean isTimerRunning1 = true, isTimerRunning2 = true;
   boolean &isTimerRunning = (motorID == 1) ? isTimerRunning1 : isTimerRunning2;
@@ -390,8 +393,12 @@ void controlMotor(int motorID, float_t setSpeed, TwoWire &wire, uint8_t pulPin, 
   }
 
   uint32_t stepFreq = (uint32_t)(abs(commandSpeed) * 1600.0 / (2 * PI));
+  if (stepFreq == 0) stepFreq = 1;
+  uint32_t usInterval = 1000000 / (stepFreq * 2);
+  if (usInterval < 20) usInterval = 20; // Cap to 50kHz max to avoid interrupt storm
+
   gpio_set_level((gpio_num_t)dirPin, commandSpeed > 0 ? 0 : 1);
-  (motorID == 1) ? setStepperSpeed1(1000000 / (stepFreq * 2)) : setStepperSpeed2(1000000 / (stepFreq * 2));
+  (motorID == 1) ? setStepperSpeed1(usInterval) : setStepperSpeed2(usInterval);
   
   // Store values for debugging
   if (motorID == 1) {
