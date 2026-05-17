@@ -61,5 +61,4 @@ sudo apt install python3-pynput
     ```
 
 
-## Wiring
-![Stepper-ESP32-Gripper](images/wiring.png)
+## [Wiring](https://docs.google.com/spreadsheets/d/148Pn-JOkxJXt4vuCkBG5iN1ytmYvzMMpI6qVGI1lK2w/edit?usp=sharing)
