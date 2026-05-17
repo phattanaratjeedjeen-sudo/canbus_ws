@@ -46,6 +46,7 @@ sudo apt install python3-pynput
 ** Before run any node user must stay at `~/canbus_ws` and open `new terminal` everytime
 1. Run teleop node. If using web interface is prefered. Skip this node
     ```bash
+    # make sure using X11 not waylan
     ros2 run hardware_control teleop_jog.py 
     ```
 
@@ -59,19 +60,6 @@ sudo apt install python3-pynput
     ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0
     ```
 
-## Set servo gripper position
-~/canbus_ws/firmware/stepper_control/src/main.cpp at line 18-21
-
-## Example service call
-1. To grip
-    ```bash
-    ros2 service call /grip std_srvs/srv/SetBool "{data: true}"
-    ```
-
-2. To release
-    ```bash
-    ros2 service call /grip std_srvs/srv/SetBool "{data: false}"
-    ```
 
 ## Wiring
 ![Stepper-ESP32-Gripper](images/wiring.png)
